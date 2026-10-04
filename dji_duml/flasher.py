@@ -59,7 +59,7 @@ REMOTE_PATH = "/upgrade/dji_system.bin"
 WINDOW = 1250
 #: Data chunks per send_batch call (about 64 KB).
 BATCH = 64
-#: A main controller still starting after a reboot reports firmware 00.00.0000.
+#: Module 0x1F still starting after a reboot reports firmware 00.00.0000.
 NOT_READY = FirmwareVersion(0, 0, 0)
 
 
@@ -288,7 +288,7 @@ class Flasher:
         self.sleep = sleep
         self._last: Progress | None = None
         self._procedure = LEGACY_FTP
-        #: Module whose status pushes count: the main controller for the legacy
+        #: Module whose status pushes count: the version target (0x1F) for the legacy
         #: procedure, the upgrade center for UPGRADE_CENTER.
         self._sender = profile.target
         self._digests: dict[str, bytes] = {}
@@ -425,7 +425,7 @@ class Flasher:
             # another module may have failed while the main firmware changed.
             raise FlashOutcomeUnknown(self._early_failure_text(early))
         if center and not completion:
-            # The main controller's version cannot vouch for the other modules.
+            # The version 0x1F reports cannot vouch for the other modules.
             raise FlashOutcomeUnknown(
                 "The upgrade center's verdict (Complete) was not received. Do not retry "
                 "automatically; read the device version and check it in DJI Assistant."
@@ -647,9 +647,10 @@ class Flasher:
             and frame.cmd_id not in (commands.CENTER_INFO, commands.CENTER_STATE))
 
     def _greet(self, client) -> None:
-        """Assistant's routine after each reconnect: in all five captured
-        reconnects the upgrade center resumed its status pushes only after it.
-        Read-only apart from 00/4A, which sets the aircraft clock. Best effort."""
+        """Assistant's routine on each connection. In its five captured
+        reconnects the status pushes resumed after it, but in our second run
+        they came 1-2 s before it, so it is copied, not relied on. Read-only
+        apart from 00/4A, which sets the aircraft clock. Best effort."""
         now = time.localtime()
         clock = (now.tm_year.to_bytes(2, "little")
                  + bytes([now.tm_mon, now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec])
@@ -1039,7 +1040,7 @@ class Flasher:
                 self.journal.event("reconnect-wait", error=type(exc).__name__, text=str(exc))
             else:
                 if seen == NOT_READY:
-                    # The main controller is still starting after a reboot.
+                    # 0x1F is still starting after a reboot.
                     self.journal.event("version-not-ready")
                     self.sleep(self.reconnect_interval)
                     continue

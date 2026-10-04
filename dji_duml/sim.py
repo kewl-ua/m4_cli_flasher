@@ -214,8 +214,9 @@ class SimulatedM4T(SimulatedDrone):
     match; 85 -> 06, then status
     pushes, ``reboots`` reboots, and after the last one 03 57 00, 03 64 00 and
     04 01 00 (or 04 <fail_result> 00). After a reboot the pushes resume only
-    once the host has greeted the aircraft (00/4A to 0x28), as in all six
-    captured reconnects. After that the main controller reports
+    once the host has greeted the aircraft (00/4A to 0x28). That is stricter
+    than the real M4T, which in our second run sent them before the greeting,
+    so a test passes only if the greeting is sent. After that 0x1F reports
     firmware 00000000 for ``zero_version_reads`` inquiries. The device asks
     the host 00/81 and 00/82 on 83 and after each reconnect.
     """

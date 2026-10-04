@@ -88,21 +88,24 @@ dji-duml --journal dji-duml-journal/flash.jsonl flash M4T_UAV_17.02.05.01_pro.zi
 
 ```mermaid
 flowchart TB
-    subgraph PC["ПК, Windows"]
+    subgraph PC["ПК (проверено на Windows)"]
         CLI["dji-duml<br/>cli.py"] --> FL["Flasher<br/>flasher.py"]
+        CLI -- "open_client: открыть и переоткрыть USB" --> TR["transport.py<br/>поиск узла MI04"]
+        CLI -. "--simulate" .-> SIM["sim.py<br/>эмулятор вместо USB"]
         FL --> PKG["package.py<br/>ZIP или dji_system.bin,<br/>манифест и MD5"]
+        FL --> CMD["commands.py<br/>полезные нагрузки и разбор"]
         FL --> CL["DumlClient<br/>client.py"]
         CL --> FR["frame.py, crc.py<br/>кадры DUML v1"]
-        CL --> TR["transport.py"]
-        TR --> LW["libusb_win32.py<br/>DLL от DJI"]
-        TR --> PU["pyusb"]
+        CL -- "write / read" --> TR
+        TR --> LW["libusb_win32.py<br/>libusb0_device.dll от DJI<br/>проверено на M4T"]
+        TR -.-> PU["pyusb: libusb0.dll или libusb-1.0<br/>на железе не проверялось"]
     end
     LW --> DRV["драйвер libusb-win32"]
-    PU --> DRV
+    PU -.-> DRV
     DRV -- "USB bulk, MI04<br/>OUT 0x04, IN 0x85" --> R
     subgraph DRONE["Matrice 4T"]
         R(("DUML"))
-        R --> FC["0x1F<br/>главный контроллер"]
+        R --> FC["0x1F<br/>отвечает версией дрона"]
         R --> UC["0x48<br/>центр обновления"]
         R --> OT["0x03, 0x28, 0x68 и другие<br/>модули и телеметрия"]
     end
@@ -128,7 +131,7 @@ flowchart TB
 sequenceDiagram
     autonumber
     participant H as dji-duml (0x2A)
-    participant F as 0x1F главный контроллер
+    participant F as 0x1F, версия дрона
     participant U as 0x48 центр обновления
     H->>F: 00/01 версия
     F-->>H: WA345T, текущая версия
@@ -136,17 +139,19 @@ sequenceDiagram
     U-->>H: 00 07 00, 00
     loop 23 файла пакета
         H->>U: 00/2A открыть (имя, размер)
-        H->>U: 00/2A куски по 980 байт
-        U-->>H: ход передачи, примерно раз в 100 мс
+        H->>U: 00/2A куски по 980 байт, без ответа на каждый
+        U-->>H: отчёт о принятых кусках, сам, раз в ~100 мс
         H->>U: 00/2A MD5 файла
     end
     H->>U: 00/85 установить
     U-->>H: 06
     U-->>H: 00/42 статусы раз в секунду
-    Note over H,U: дрон сам перезагружается 1-2 раза,<br/>USB-адрес меняется, dji-duml переподключается
+    Note over H,U: дрон сам перезагружается 1-2 раза, USB-адрес меняется,<br/>dji-duml переподключается и повторяет приветствие
     U-->>H: 00/42 Complete/Success
     H->>U: 00/4F, 00/41
     U-->>H: установленная версия
+    H->>F: 00/01, пока версия не станет целевой
+    F-->>H: 00.00.0000 = ещё не готов, затем целевая
 ```
 
 ## Документация
