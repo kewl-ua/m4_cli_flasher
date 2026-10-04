@@ -86,6 +86,28 @@ dji-duml --journal dji-duml-journal/flash.jsonl flash M4T_UAV_17.02.05.01_pro.zi
 
 ## Как это работает
 
+```mermaid
+flowchart TB
+    subgraph PC["ПК, Windows"]
+        CLI["dji-duml<br/>cli.py"] --> FL["Flasher<br/>flasher.py"]
+        FL --> PKG["package.py<br/>ZIP или dji_system.bin,<br/>манифест и MD5"]
+        FL --> CL["DumlClient<br/>client.py"]
+        CL --> FR["frame.py, crc.py<br/>кадры DUML v1"]
+        CL --> TR["transport.py"]
+        TR --> LW["libusb_win32.py<br/>DLL от DJI"]
+        TR --> PU["pyusb"]
+    end
+    LW --> DRV["драйвер libusb-win32"]
+    PU --> DRV
+    DRV -- "USB bulk, MI04<br/>OUT 0x04, IN 0x85" --> R
+    subgraph DRONE["Matrice 4T"]
+        R(("DUML"))
+        R --> FC["0x1F<br/>главный контроллер"]
+        R --> UC["0x48<br/>центр обновления"]
+        R --> OT["0x03, 0x28, 0x68 и другие<br/>модули и телеметрия"]
+    end
+```
+
 - **Транспорт.** DUML v1 по USB bulk, интерфейс MI04 (OUT `0x04`, IN `0x85`),
   VID `2CA3` / PID `0020`. DJI ставит libusb-win32 как `libusb0_device.dll` со
   своей раскладкой структур (pyusb на ней падает), поэтому для неё есть своя
@@ -101,6 +123,31 @@ dji-duml --journal dji-duml-journal/flash.jsonl flash M4T_UAV_17.02.05.01_pro.zi
   Complete от `0x48`; версия `00.00.0000` после перезагрузки означает «ещё не
   готов»; журнал JSONL пишет каждое решение. Подробно — в
   [docs/duml.md](docs/duml.md).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as dji-duml (0x2A)
+    participant F as 0x1F главный контроллер
+    participant U as 0x48 центр обновления
+    H->>F: 00/01 версия
+    F-->>H: WA345T, текущая версия
+    H->>U: 00/83, 00/84 (общий размер файлов)
+    U-->>H: 00 07 00, 00
+    loop 23 файла пакета
+        H->>U: 00/2A открыть (имя, размер)
+        H->>U: 00/2A куски по 980 байт
+        U-->>H: ход передачи, примерно раз в 100 мс
+        H->>U: 00/2A MD5 файла
+    end
+    H->>U: 00/85 установить
+    U-->>H: 06
+    U-->>H: 00/42 статусы раз в секунду
+    Note over H,U: дрон сам перезагружается 1-2 раза,<br/>USB-адрес меняется, dji-duml переподключается
+    U-->>H: 00/42 Complete/Success
+    H->>U: 00/4F, 00/41
+    U-->>H: установленная версия
+```
 
 ## Документация
 
