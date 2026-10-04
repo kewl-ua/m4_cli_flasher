@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Flash journals hold the aircraft serial number and every frame of a session.
+dji-duml-journal/
+
+# Firmware packages and USB captures stay out of git (large; captures may
+# contain serial numbers).
+*.zip
+*.bin
+*.sig
+*.pcap
+*.pcapng

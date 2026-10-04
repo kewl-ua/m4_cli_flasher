@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dji-duml"
+version = "0.1.0"
+description = "Flash DJI Matrice 4T firmware over USB with the DUML protocol, without DJI Assistant"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+# USB access. Framing, packages, captures and the simulator need only the
+# standard library.
+usb = ["pyusb>=1.2"]
+
+[project.scripts]
+dji-duml = "dji_duml.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dji_duml*"]
