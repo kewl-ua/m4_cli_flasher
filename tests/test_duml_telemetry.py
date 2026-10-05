@@ -31,6 +31,9 @@ class FlycOsdGeneralTests(unittest.TestCase):
         item = parse_flyc_osd_general(payload)
         self.assertEqual(len(payload), 84)
         self.assertEqual(item.tail, bytes(range(48)))
+        self.assertEqual(item.legacy_base_region, bytes(range(14)))
+        self.assertEqual(item.legacy_wm620_region, bytes(range(14, 19)))
+        self.assertEqual(item.newer_extension, bytes(range(19, 48)))
 
     def test_short_payload_is_rejected(self):
         with self.assertRaises(UnexpectedReply):
