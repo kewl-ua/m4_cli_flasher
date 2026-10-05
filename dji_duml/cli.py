@@ -110,15 +110,23 @@ def _capture_frames(path):
 
 
 def cmd_topology(args, profile) -> int:
+    roles = {profile.target: "Primary target"}
+    if profile.upgrade_center is not None:
+        roles[profile.upgrade_center] = "Upgrade Center"
     if args.capture:
         graph = topology.from_capture(
             args.capture, host=profile.host, device=args.device,
-            endpoints=set(args.endpoint) if args.endpoint else None,
+            endpoints=set(args.endpoint) if args.endpoint else None, roles=roles,
         )
     else:
-        graph = topology.Topology(host=profile.host)
+        graph = topology.Topology(host=profile.host, roles=roles)
         journal = Journal(args.journal)
         with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+            # DumlClient normally keeps only the General set so telemetry cannot
+            # flood flash/reader workflows. Discovery is the opposite use case:
+            # every valid frame is evidence, while journal_rx still prevents
+            # per-frame telemetry fsync/logging.
+            client.keep = lambda frame: True
             deadline = time.monotonic() + args.seconds
             while time.monotonic() < deadline:
                 for frame in client.poll(min(0.1, max(0.0, deadline - time.monotonic()))):
