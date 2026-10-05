@@ -73,8 +73,10 @@ class Module:
 class Topology:
     """Observed DUML address graph."""
 
-    def __init__(self, *, host: int | None = None):
+    def __init__(self, *, host: int | None = None,
+                 roles: dict[int, str] | None = None):
         self.host = host
+        self.roles = dict(roles or {})
         self.nodes: dict[int, Module] = {}
         self.frames = 0
 
@@ -124,6 +126,7 @@ class Topology:
                 "type": node.device_type,
                 "index": node.index,
                 "name": node.type_name,
+                "role": self.roles.get(node.address),
                 "confirmed": node.confirmed,
                 "sent": node.sent,
                 "received": node.received,
@@ -152,17 +155,19 @@ class Topology:
         }
 
 
-def from_frames(frames: Iterable[Frame], *, host: int | None = None) -> Topology:
-    return Topology(host=host).extend(frames)
+def from_frames(frames: Iterable[Frame], *, host: int | None = None,
+                roles: dict[int, str] | None = None) -> Topology:
+    return Topology(host=host, roles=roles).extend(frames)
 
 
 def from_capture(path, *, host: int | None = None, device: int | None = None,
-                 endpoints: set[int] | None = None) -> Topology:
+                 endpoints: set[int] | None = None,
+                 roles: dict[int, str] | None = None) -> Topology:
     """Build topology directly from a USBPcap/pcapng capture."""
     from . import pcap
     return from_frames(
         (entry.frame for entry in pcap.iter_frames(path, device=device, endpoints=endpoints)),
-        host=host,
+        host=host, roles=roles,
     )
 
 
@@ -181,15 +186,19 @@ def report(topology: Topology, *, commands_per_module: int = 8) -> str:
             version = f"  fw={node.version.firmware} hw={node.version.hardware!r}"
         source = "active+passive" if node.active_probe and node.sent else (
             "active" if node.active_probe else "passive")
+        role = topology.roles.get(node.address)
+        label = f"{role} [{node.type_name}]" if role else node.type_name
         lines.append(
-            f"+ 0x{node.address:02X}  {node.type_name} idx={node.index}  "
+            f"+ 0x{node.address:02X}  {label} idx={node.index}  "
             f"{source}  tx={node.sent} rx={node.received}{version}"
         )
         lines.append(f"    commands: {command_text(node)}")
 
     for node in topology.candidates:
+        role = topology.roles.get(node.address)
+        label = f"{role} [{node.type_name}]" if role else node.type_name
         lines.append(
-            f"? 0x{node.address:02X}  {node.type_name} idx={node.index}  "
+            f"? 0x{node.address:02X}  {label} idx={node.index}  "
             f"receiver-only  rx={node.received}"
         )
     return "\n".join(lines)
