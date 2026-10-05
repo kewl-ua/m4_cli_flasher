@@ -20,12 +20,12 @@ from .errors import (
 from .display import ProgressView
 from .extract import REPORT, extract
 from .flasher import PROCEDURES, UPGRADE_CENTER, Flasher, Stage, plan
-from .frame import format_address
+from .frame import address, format_address
 from .ingest import add, harvest
 from .journal import Journal
 from .pack import pack
 from .package import inspect_package
-from .profiles import PROFILES, get_profile
+from .profiles import PC, PROFILES, get_profile
 from .store import Store, StoreError, assistant_cache, size_text
 from .version import FirmwareVersion
 
@@ -127,9 +127,14 @@ def cmd_topology(args, profile) -> int:
             # every valid frame is evidence, while journal_rx still prevents
             # per-frame telemetry fsync/logging.
             client.keep = lambda frame: True
-            if args.answer_center:
+            if args.answer_center or args.assistant_session:
                 client.responders[(commands.GENERAL, commands.CENTER_INFO)] = commands.CENTER_INFO_REPLY
                 client.responders[(commands.GENERAL, commands.CENTER_STATE)] = commands.CENTER_STATE_REPLY
+            if args.assistant_session:
+                client.set_keepalive(
+                    1.0, address(PC, 0), 0x00, commands.GENERAL,
+                    commands.UPGRADE_REPORT, b"\x00",
+                )
             deadline = time.monotonic() + args.seconds
             while time.monotonic() < deadline:
                 for frame in client.poll(min(0.1, max(0.0, deadline - time.monotonic()))):
@@ -824,6 +829,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="live: read-only Version Inquiry to this DUML address; repeatable")
     topo.add_argument("--answer-center", action="store_true",
                       help="live: answer M4T 00/81 and 00/82 with captured DJI Assistant replies")
+    topo.add_argument("--assistant-session", action="store_true",
+                      help="live: also send captured Assistant 00/0C keepalive once per second")
     topo.add_argument("--probe-timeout", type=float, default=0.2,
                       help="live: seconds per explicit Version Inquiry (default 0.2)")
     topo.add_argument("--commands", type=int, default=8,
