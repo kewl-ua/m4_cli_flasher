@@ -1485,6 +1485,15 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                 lines.append(
                                     "       tail-accel-corr: " + "  ".join(corr_parts)
                                 )
+                            if tail["body_rate_correlations"]:
+                                corr_parts = [
+                                    f"{item['type']}@{item['offset']:02X}"
+                                    f"->{item['signal']}={item['corr']:+.3f}"
+                                    for item in tail["body_rate_correlations"]
+                                ]
+                                lines.append(
+                                    "       tail-body-rate-corr: " + "  ".join(corr_parts)
+                                )
                             if tail["counter_candidates"]:
                                 counter_parts = [
                                     f"@{item['offset']:02X}="
