@@ -1656,12 +1656,17 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                     "       tail-body-rate-fit: " + "  ".join(fit_parts)
                                 )
                             motion = tail["motion_axis_rms"]
+                            axis_name = {
+                                "omega_x": "roll/x",
+                                "omega_y": "pitch/y",
+                                "omega_z": "yaw/z",
+                            }[tail["motion_dominant_axis"]]
                             lines.append(
                                 "       tail-motion: "
-                                f"rms[x={motion['omega_x']:.2f},"
-                                f"y={motion['omega_y']:.2f},"
-                                f"z={motion['omega_z']:.2f}] "
-                                f"dominant={tail['motion_dominant_axis']} "
+                                f"rms[roll/x={motion['omega_x']:.2f},"
+                                f"pitch/y={motion['omega_y']:.2f},"
+                                f"yaw/z={motion['omega_z']:.2f}] "
+                                f"dominant={axis_name} "
                                 f"purity={tail['motion_purity']:.3f}"
                             )
                             if tail["unknown35_body_rate_fits"]:
