@@ -429,6 +429,26 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                             f"ctrl=0x{osd.ctrl_info:02X} state=0x{osd.controller_state:08X} "
                             f"tail={len(osd.tail)}B"
                         )
+                elif stream.cmd_set == 0x04 and stream.cmd_id == 0x05:
+                    from .telemetry import parse_gimbal_params
+                    try:
+                        gimbal = parse_gimbal_params(stream.sample_payload)
+                    except UnexpectedReply:
+                        pass
+                    else:
+                        pitch, roll, yaw = gimbal.attitude_deg
+                        line = (
+                            f"       decoded-prefix: att=({pitch:.1f},{roll:.1f},{yaw:.1f})deg "
+                            f"mode=0x{gimbal.mode_flags:02X} limits=0x{gimbal.limit_flags:02X}"
+                        )
+                        if gimbal.quaternion_wxyz is not None:
+                            w, x, y, z = gimbal.quaternion_wxyz
+                            line += (
+                                f" q=({w:.6f},{x:.6f},{y:.6f},{z:.6f}) "
+                                f"|q|={gimbal.quaternion_norm:.6f}"
+                            )
+                        line += f" opaque={len(gimbal.middle) + len(gimbal.tail)}B"
+                        lines.append(line)
                 lines.append(
                     f"       changed: {_offset_ranges(stream.changed_offsets)}"
                     + (" (length varies)" if stream.payload_length_changed else "")
