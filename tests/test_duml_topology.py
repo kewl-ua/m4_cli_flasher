@@ -36,13 +36,33 @@ class PassiveTopologyTests(unittest.TestCase):
         topology = from_frames([Frame(fc, 0x2A, 1, 3, 0x57, b"abc", ack=0)], host=0x2A)
         data = topology.as_dict()
         self.assertEqual(data["frames"], 1)
-        self.assertEqual(data["confirmed"][0]["name"], "Flight Controller")
+        self.assertEqual(data["confirmed"][0]["legacy_type_name"], "Flight Controller")
         self.assertEqual(data["confirmed"][0]["commands_sent"]["03/57"], 1)
 
     def test_explicit_address_space(self):
         self.assertEqual(addresses((1, 4), (0, 2)),
                          (address(1, 0), address(1, 2),
                           address(4, 0), address(4, 2)))
+
+    def test_stream_fingerprint_rate_lengths_unique_and_seq(self):
+        topology = Topology(host=0x2A)
+        frame1 = Frame(0x03, 0x0A, 10, 3, 0x43, b"abc", ack=0)
+        frame2 = Frame(0x03, 0x0A, 11, 3, 0x43, b"abd", ack=0)
+        frame3 = Frame(0x03, 0x0A, 13, 3, 0x43, b"abd", ack=0)
+        topology.observe(frame1, 1.0)
+        topology.observe(frame2, 1.5)
+        topology.observe(frame3, 2.0)
+        stream = topology.streams_from(0x03)[0]
+        self.assertEqual(stream.count, 3)
+        self.assertEqual(stream.payload_min, 3)
+        self.assertEqual(stream.payload_max, 3)
+        self.assertEqual(stream.unique_payloads, 2)
+        self.assertAlmostEqual(stream.rate_hz, 2.0)
+        self.assertEqual(dict(stream.seq_steps), {"+1": 1, "other": 1})
+        verbose = report(topology, verbose=True)
+        self.assertIn("2.0 Hz", verbose)
+        self.assertIn("unique=2", verbose)
+        self.assertIn("seq[+1:1/same:0/other:1]", verbose)
 
     def test_report_distinguishes_confirmed_and_candidates(self):
         host = address(10, 1)
@@ -53,9 +73,9 @@ class PassiveTopologyTests(unittest.TestCase):
             Frame(host, gimbal, 2, 4, 0x02),
         ], host=host, roles={fc: "Primary target"})
         text = report(topology)
-        self.assertIn("+ 0x03  Primary target [Flight Controller] idx=0", text)
+        self.assertIn("+ 0x03  Primary target [type=3 legacy:Flight Controller] idx=0", text)
         self.assertIn("03/43 x1", text)
-        self.assertIn("? 0x24  Gimbal idx=1", text)
+        self.assertIn("? 0x24  type=4 legacy:Gimbal idx=1", text)
         self.assertEqual(topology.as_dict()["confirmed"][0]["role"], "Primary target")
 
 
