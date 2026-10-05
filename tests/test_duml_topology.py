@@ -213,7 +213,9 @@ class PassiveTopologyTests(unittest.TestCase):
             )
 
         text = report(topology, verbose=True)
-        self.assertIn("cross-attitude: pairs=4", text)
+        self.assertIn("cross-attitude: samples=", text)
+        self.assertIn("best-lag=", text)
+        self.assertIn("fc-bracket=", text)
         self.assertIn("q-relative-solved:", text)
         self.assertIn("quaternion-relative-models:", text)
         self.assertIn("pitch corr=+1.000", text)
