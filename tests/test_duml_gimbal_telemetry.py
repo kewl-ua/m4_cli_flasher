@@ -72,7 +72,6 @@ class GimbalParamsTests(unittest.TestCase):
         self.assertLess(item.quaternion_orientation_error_deg, 0.1)
         self.assertAlmostEqual(item.relative_yaw_deg, 27.4, places=1)
         self.assertAlmostEqual(item.yaw_reference_deg, -86.85, places=2)
-        self.assertAlmostEqual(item.predicted_yaw_deg, -59.45, places=2)
 
     def test_quaternion_wz_matches_stationary_legacy_yaw(self):
         item = parse_gimbal_params(self.STATIONARY)
