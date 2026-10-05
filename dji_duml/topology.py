@@ -834,6 +834,15 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         name: [known[name] for _, _, known in rows]
         for name in ("height", "vx", "vy", "vz", "pitch", "roll", "yaw")
     }
+    signal_min_span = {
+        "height": 0.5,
+        "vx": 0.5,
+        "vy": 0.5,
+        "vz": 0.5,
+        "pitch": 5.0,
+        "roll": 5.0,
+        "yaw": 5.0,
+    }
 
     body_rate_signals = {
         name: [None] * len(rows)
@@ -940,6 +949,8 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         for signedness, values in (("u16", unsigned), ("i16", signed)):
             numeric = [float(value) for value in values]
             for signal, target in signals.items():
+                if max(target) - min(target) < signal_min_span[signal]:
+                    continue
                 corr = _pearson(numeric, target)
                 if corr is None or abs(corr) < 0.80:
                     continue
