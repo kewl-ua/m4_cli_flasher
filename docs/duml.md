@@ -589,3 +589,13 @@ safe to reuse on M4T.
 Correlations and legacy labels are RE hints only. A field is not promoted into
 the typed decoder until its scale, sign, behavior and physical meaning survive
 controlled experiments.
+
+
+### Kinematic-fit excitation guard
+
+The cross-attitude kinematic fit is intentionally skipped when fewer than two
+FC attitude axes span at least 10 degrees during the retained window. A
+stationary or single-axis capture cannot identify temporal lag, full
+three-axis rotation order or a fixed mounting transform uniquely; reporting a
+"best" model in that case is misleading. Those captures remain valid for
+single-field telemetry diagnostics such as FLYC tail analysis.
