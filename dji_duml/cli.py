@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
-from . import commands, installed, params, pcap
+from . import commands, installed, params, pcap, topology
 from .client import DumlClient
 from .errors import (
     DumlError, FlashAborted, FlashFailed, FlashOutcomeUnknown, FlashRefused,
@@ -107,6 +107,30 @@ def cmd_version(args, profile) -> int:
 
 def _capture_frames(path):
     return (entry.frame for entry in pcap.iter_frames(path))
+
+
+def cmd_topology(args, profile) -> int:
+    if args.capture:
+        graph = topology.from_capture(
+            args.capture, host=profile.host, device=args.device,
+            endpoints=set(args.endpoint) if args.endpoint else None,
+        )
+    else:
+        graph = topology.Topology(host=profile.host)
+        journal = Journal(args.journal)
+        with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+            deadline = time.monotonic() + args.seconds
+            while time.monotonic() < deadline:
+                for frame in client.poll(min(0.1, max(0.0, deadline - time.monotonic()))):
+                    graph.observe(frame)
+            if args.probe:
+                topology.probe_versions(client, graph, args.probe, timeout=args.probe_timeout)
+
+    if args.json:
+        _say(json.dumps(graph.as_dict(), ensure_ascii=False))
+    else:
+        _say(topology.report(graph, commands_per_module=args.commands))
+    return 0 if graph.confirmed else 2
 
 
 def cmd_manifest(args, profile) -> int:
@@ -777,6 +801,22 @@ def build_parser() -> argparse.ArgumentParser:
     decode.add_argument("--full", action="store_true", help="do not truncate payloads")
     decode.add_argument("--json", action="store_true", help="one JSON object per frame")
 
+    topo = sub.add_parser(
+        "topology", help="discover DUML module types and indexes from traffic")
+    topo.add_argument("--capture", help="pcap/pcapng instead of a live USB device")
+    topo.add_argument("--device", type=_number, help="capture: USB device address to keep")
+    topo.add_argument("--endpoint", type=_number, action="append",
+                      help="capture: endpoint to keep; repeatable")
+    topo.add_argument("--seconds", type=float, default=2.0,
+                      help="live: passive observation window (default 2.0)")
+    topo.add_argument("--probe", type=_number, action="append",
+                      help="live: read-only Version Inquiry to this DUML address; repeatable")
+    topo.add_argument("--probe-timeout", type=float, default=0.2,
+                      help="live: seconds per explicit Version Inquiry (default 0.2)")
+    topo.add_argument("--commands", type=int, default=8,
+                      help="text report: top commands per module (default 8)")
+    topo.add_argument("--json", action="store_true", help="one JSON topology object")
+
     manifest = sub.add_parser(
         "manifest", help="read the signed manifest of the firmware installed on the drone")
     manifest.add_argument("--capture", help="take it from a capture instead of the drone")
@@ -858,7 +898,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 HANDLERS = {"scan": cmd_scan, "version": cmd_version, "inspect": cmd_inspect,
-            "plan": cmd_plan, "decode": cmd_decode, "manifest": cmd_manifest,
+            "plan": cmd_plan, "decode": cmd_decode, "topology": cmd_topology,
+            "manifest": cmd_manifest,
             "params": cmd_params, "extract": cmd_extract, "pack": cmd_pack,
             "fw": cmd_fw, "flash": cmd_flash}
 
