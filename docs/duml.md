@@ -645,3 +645,28 @@ structurally. For example, payload offset 0x36 is treated as the high byte of
 the historical Unknown35 word at 0x35..0x36 rather than as an independent
 binary/categorical state, regardless of whether that high byte takes values
 00/FF or FE/FF/00/01 during wider signed excursions.
+
+
+### Current Unknown35 yaw-rate evidence
+
+Three controlled single-axis body-motion captures (pitch, yaw, roll) strongly
+separate the historical WM620 Unknown35 word at payload 0x35..0x36:
+
+- pitch-only: dynamic signed values, but no strong quaternion body-rate
+  correlation;
+- yaw-only: i16@0x35 correlates +0.887 with quaternion-derived body omega_z and
+  +0.889 with Euler yaw-rate;
+- roll-only: dynamic signed values, but no strong quaternion body-rate
+  correlation.
+
+This supports treating i16@0x35 as a yaw-rate-related candidate on M4T. It is
+not yet promoted into the typed decoder because its scale, bias, filtering and
+timing relationship remain unknown.
+
+Verbose topology now scans +/-3 FLYC samples for each i16/body-rate candidate
+and reports the best linear model:
+
+    omega = scale * raw + bias
+
+together with lag in samples, Pearson correlation and RMSE. Counter-like
+offsets such as the ~50 Hz candidate at 0x28 are excluded from this fit.
