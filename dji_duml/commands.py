@@ -45,12 +45,17 @@ FLYC_NAMES = {
     0xE5: "Push Cfg Table Attr", 0xE9: "Cfg Command Table",
 }
 
+BATTERY = 0x0D
+BATTERY_NAMES = {0x02: "Battery Dynamic Data"}
+
 
 def command_name(cmd_set: int, cmd_id: int) -> str:
     if cmd_set == GENERAL and cmd_id in GENERAL_NAMES:
         return GENERAL_NAMES[cmd_id]
     if cmd_set == FLYC and cmd_id in FLYC_NAMES:
         return FLYC_NAMES[cmd_id]
+    if cmd_set == BATTERY and cmd_id in BATTERY_NAMES:
+        return BATTERY_NAMES[cmd_id]
     return f"set {cmd_set:02x} id {cmd_id:02x}"
 
 

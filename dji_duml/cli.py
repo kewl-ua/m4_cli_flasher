@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
-from . import commands, installed, params, pcap, roles, writes
+from . import battery, commands, installed, params, pcap, roles, writes
 from .client import DumlClient
 from .errors import (
     DumlError, FlashAborted, FlashFailed, FlashOutcomeUnknown, FlashRefused,
@@ -348,6 +348,37 @@ def cmd_set_param(args, profile) -> int:
                   file=sys.stderr)
             return 4
     return _say_result(result, json_out=args.json)
+
+
+def cmd_battery(args, profile) -> int:
+    if args.capture:
+        data = battery.from_frames(_capture_frames(args.capture))
+        if data is None:
+            print("No battery data (0D/02) in this capture.", file=sys.stderr)
+            return 2
+    else:
+        journal = Journal(args.journal)
+        with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+            data = battery.read(client)
+    if args.json:
+        _say(json.dumps({
+            "voltage_mv": data.voltage_mv, "current_ma": data.current_ma,
+            "full_capacity_mah": data.full_capacity_mah, "remaining_mah": data.remaining_mah,
+            "temperature_c": data.temperature, "cell_count": data.cell_count,
+            "cell_voltage": round(data.cell_voltage, 3) if data.cell_voltage else None,
+            "state_of_charge": data.state_of_charge, "status": data.status,
+            "tail": data.tail.hex()}))
+        return 0
+    flow = ("  (discharging)" if data.current_ma < 0 else
+            "  (charging)" if data.current_ma > 0 else "")
+    percell = f" ({data.cell_voltage:.3f} V/cell)" if data.cell_voltage else ""
+    _say(f"charge    {data.state_of_charge}%  ({data.remaining_mah} / {data.full_capacity_mah} mAh)")
+    _say(f"voltage   {data.voltage:.3f} V, {data.cell_count} cells{percell}")
+    _say(f"current   {data.current:+.3f} A{flow}")
+    _say(f"temp      {data.temperature:.1f} C")
+    _say(f"status    0x{data.status:016x}" + ("  (healthy)" if data.status == 0 else ""))
+    _say(_ascii(f"tail      {data.tail.hex()}  (undecoded; may identify the pack - don't publish)"))
+    return 0
 
 
 def _show_package(package) -> None:
@@ -1034,6 +1065,12 @@ def build_parser() -> argparse.ArgumentParser:
                                           "read-only, never writes")
     setter.add_argument("--json", action="store_true", help="one JSON object")
 
+    batt = sub.add_parser(
+        "battery", help="read smart-battery data (voltage, current, capacity, temperature, "
+                        "cells, charge); reads only")
+    batt.add_argument("--capture", help="take it from a capture instead of the drone")
+    batt.add_argument("--json", action="store_true", help="one JSON object")
+
     extractor = sub.add_parser(
         "extract", help="recover the files a capture shows being sent to the upgrade center")
     extractor.add_argument("capture", help="pcap or pcapng, USBPcap or usbmon")
@@ -1105,8 +1142,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 HANDLERS = {"scan": cmd_scan, "version": cmd_version, "inspect": cmd_inspect,
             "plan": cmd_plan, "decode": cmd_decode, "manifest": cmd_manifest,
-            "params": cmd_params, "set-param": cmd_set_param, "extract": cmd_extract,
-            "pack": cmd_pack, "fw": cmd_fw, "flash": cmd_flash}
+            "params": cmd_params, "set-param": cmd_set_param, "battery": cmd_battery,
+            "extract": cmd_extract, "pack": cmd_pack, "fw": cmd_fw, "flash": cmd_flash}
 
 
 def main(argv: list[str] | None = None) -> int:

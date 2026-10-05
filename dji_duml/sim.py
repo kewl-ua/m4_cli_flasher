@@ -13,7 +13,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import commands
+from . import battery, commands
 from .client import DumlClient
 from .errors import TransportError
 from .frame import AckType, Frame, StreamParser
@@ -203,6 +203,21 @@ SIM_PARAMS = [
 ]
 
 
+def _battery_block(voltage_mv=16600, current_ma=-300, full=6690, remaining=6356,
+                   temp_dc=250, cells=4, soc=95, status=0, tail=None) -> bytes:
+    """A 45-byte 0D/02 reply in the M4T's field order, SoC consistent with
+    remaining/full by default."""
+    if tail is None:
+        tail = b"\x01" + bytes(10) + bytes([0x03, 0, 0, 0])  # version byte, then opaque
+    block = (b"\x00\x00" + struct.pack("<IiII", voltage_mv, current_ma, full, remaining)
+             + struct.pack("<H", temp_dc) + bytes([cells, soc]) + struct.pack("<Q", status) + tail)
+    return block
+
+
+#: Default smart-battery data the simulator returns for 0D/02.
+SIM_BATTERY = _battery_block()
+
+
 def _config_for(version: FirmwareVersion, product: str = "wa345t") -> bytes:
     """A configuration as DJI lays it out (IM*H header, readable manifest),
     listing no modules."""
@@ -250,7 +265,7 @@ class SimulatedM4T(SimulatedDrone):
                  mute_progress: bool = False, lose=(), repeat_reports: int = 1,
                  tick: float | None = None, installed_config: bytes | None = None,
                  params: list[tuple] | None = None, require_unlock: bool = False,
-                 ignore_writes=(), **options):
+                 ignore_writes=(), battery_data: bytes | None = None, **options):
         super().__init__(profile, firmware, **options)
         self.center = profile.upgrade_center
         #: What 00/4F type 01 returns; by default a manifest of ``firmware``.
@@ -267,6 +282,8 @@ class SimulatedM4T(SimulatedDrone):
         self.ignore_writes = set(ignore_writes)
         #: Every accepted write, as (index, value bytes), in order.
         self.writes: list[tuple[int, bytes]] = []
+        #: The 45-byte block returned for a 0D/02 battery read.
+        self.battery_data = SIM_BATTERY if battery_data is None else battery_data
         self.reboots = reboots
         self.zero_version_reads = zero_version_reads
         self.progress_every = progress_every
@@ -382,6 +399,11 @@ class SimulatedM4T(SimulatedDrone):
                 and not frame.response:
             self.received.append(frame)
             self._flight_controller(link, frame)
+            return
+        if (frame.receiver == battery.BATTERY_ADDRESS and frame.cmd_set == commands.BATTERY
+                and frame.cmd_id == battery.DYNAMIC_DATA and not frame.response):
+            self.received.append(frame)
+            self._answer(link, frame, self.battery_data)
             return
         super().handle(link, frame)
 
