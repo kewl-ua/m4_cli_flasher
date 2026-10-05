@@ -430,3 +430,23 @@ Ctrl+C во время прошивки не останавливает устр
 - Несколько дронов одной модели одновременно не поддержаны: блокировка
   одна на модель, а дрон меняет USB-адрес при каждой перезагрузке.
 - Шифрованные кадры (`encrypt != 0`) только отображаются.
+
+
+### M4T Gimbal 04/05 fields verified experimentally
+
+Controlled stationary, pitch-only and yaw-only captures establish these M4T
+fields in the 49-byte GIMBAL 04/05 push:
+
+- 0x00..0x05: legacy pitch/roll/yaw, signed int16, 0.1 degree.
+- 0x08..0x09: signed relative yaw, 0.1 degree.
+- 0x0C..0x0F: monotonic timestamp in milliseconds.
+- 0x10..0x11: signed yaw reference, 0.01 degree. reference + relative yaw
+  predicts packet yaw with sub-degree median error in controlled captures.
+- 0x14..0x15: secondary pitch/joint angle, signed int16, 0.1 degree. It tracks
+  packet pitch with ~1.0 correlation in large-range pitch motion.
+- 0x18..0x27: float32 quaternion w,x,y,z, unit norm.
+
+The fields at 0x12..0x13, 0x16..0x17 and 0x28..end remain unnamed. At high
+pitch rates/extreme pitch angles the quaternion and legacy mechanical Euler
+angles can diverge transiently, so they must not be treated as identical
+measurements in all dynamic conditions.
