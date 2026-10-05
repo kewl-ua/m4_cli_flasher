@@ -379,6 +379,122 @@ def _angle_delta_degrees(current: float, previous: float) -> float:
     return (current - previous + 180.0) % 360.0 - 180.0
 
 
+def _unwrap_degrees(values: list[float]) -> list[float]:
+    if not values:
+        return []
+    result = [values[0]]
+    for value in values[1:]:
+        previous_wrapped = (result[-1] + 180.0) % 360.0 - 180.0
+        delta = (value - previous_wrapped + 180.0) % 360.0 - 180.0
+        result.append(result[-1] + delta)
+    return result
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _find_stream(topology: Topology, cmd_set: int, cmd_id: int) -> TrafficStream | None:
+    matches = [
+        stream for stream in topology.streams.values()
+        if not stream.response and stream.cmd_set == cmd_set and stream.cmd_id == cmd_id
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda stream: stream.count)
+
+
+def _cross_yaw_diagnostics(topology: Topology) -> dict | None:
+    """Pair FLYC 03/43 with GIMBAL 04/05 by nearest host receive timestamp."""
+    from .telemetry import parse_flyc_osd_general, parse_gimbal_params
+
+    fc_stream = _find_stream(topology, 0x03, 0x43)
+    gimbal_stream = _find_stream(topology, 0x04, 0x05)
+    if fc_stream is None or gimbal_stream is None:
+        return None
+
+    fc_rows = []
+    for timestamp, payload in fc_stream._samples:
+        if timestamp is None:
+            continue
+        try:
+            item = parse_flyc_osd_general(payload)
+        except UnexpectedReply:
+            continue
+        fc_rows.append((timestamp, item.attitude_deg[2]))
+
+    gimbal_rows = []
+    for timestamp, payload in gimbal_stream._samples:
+        if timestamp is None:
+            continue
+        try:
+            item = parse_gimbal_params(payload)
+        except UnexpectedReply:
+            continue
+        if item.yaw_reference_deg is None:
+            continue
+        gimbal_rows.append((
+            timestamp,
+            item.attitude_deg[2],
+            item.yaw_reference_deg,
+            item.relative_yaw_deg,
+        ))
+
+    if len(fc_rows) < 3 or len(gimbal_rows) < 3:
+        return None
+
+    pairs = []
+    gi = 0
+    for fc_time, fc_yaw in fc_rows:
+        while gi + 1 < len(gimbal_rows):
+            here = abs(gimbal_rows[gi][0] - fc_time)
+            nxt = abs(gimbal_rows[gi + 1][0] - fc_time)
+            if nxt <= here:
+                gi += 1
+            else:
+                break
+        g_time, g_yaw, reference, relative = gimbal_rows[gi]
+        skew = abs(g_time - fc_time)
+        if skew <= 0.30:
+            pairs.append((skew, fc_yaw, g_yaw, reference, relative))
+
+    if len(pairs) < 3:
+        return None
+
+    skews_ms = [row[0] * 1000.0 for row in pairs]
+    fc = [row[1] for row in pairs]
+    gimbal = [row[2] for row in pairs]
+    reference = [row[3] for row in pairs]
+    relative = [row[4] for row in pairs]
+    fc_ref_errors = [_angle_error_degrees(a, b) for a, b in zip(fc, reference)]
+
+    fc_u = _unwrap_degrees(fc)
+    gimbal_u = _unwrap_degrees(gimbal)
+    reference_u = _unwrap_degrees(reference)
+    relative_u = _unwrap_degrees(relative)
+
+    return {
+        "pairs": len(pairs),
+        "skew_median_ms": _median(skews_ms),
+        "skew_max_ms": max(skews_ms),
+        "fc_range": _range(fc_u),
+        "gimbal_range": _range(gimbal_u),
+        "reference_range": _range(reference_u),
+        "relative_range": _range(relative_u),
+        "fc_reference_corr": _pearson(fc_u, reference_u),
+        "fc_gimbal_corr": _pearson(fc_u, gimbal_u),
+        "fc_relative_corr": _pearson(fc_u, relative_u),
+        "fc_reference_error_median": _median(fc_ref_errors),
+        "fc_reference_error_max": max(fc_ref_errors),
+    }
+
+
 def _gimbal_angle_correlations(stream: TrafficStream) -> dict[str, dict[str, float | None]]:
     """Correlate opaque int16 fields with the actual Euler angles."""
     if stream.cmd_set != 0x04 or stream.cmd_id != 0x05:
@@ -824,6 +940,36 @@ def report(topology: Topology, *, commands_per_module: int = 8,
             f"? 0x{node.address:02X}  {_label(topology, node)} idx={node.index}  "
             f"receiver-only  rx={node.received}"
         )
+
+    if verbose:
+        cross = _cross_yaw_diagnostics(topology)
+        if cross is not None:
+            def corr(value):
+                return f"{value:+.3f}" if value is not None else "?"
+            lines.append(
+                "cross-yaw: "
+                f"pairs={cross['pairs']} "
+                f"skew={cross['skew_median_ms']:.1f}ms median/"
+                f"{cross['skew_max_ms']:.1f}ms max"
+            )
+            lines.append(
+                "    ranges: "
+                f"fc={cross['fc_range'][0]:.1f}..{cross['fc_range'][1]:.1f}deg  "
+                f"gimbal={cross['gimbal_range'][0]:.1f}..{cross['gimbal_range'][1]:.1f}deg  "
+                f"ref@10={cross['reference_range'][0]:.2f}..{cross['reference_range'][1]:.2f}deg  "
+                f"relative@08={cross['relative_range'][0]:.1f}..{cross['relative_range'][1]:.1f}deg"
+            )
+            lines.append(
+                "    corr(unwrapped): "
+                f"fc-ref={corr(cross['fc_reference_corr'])}  "
+                f"fc-gimbal={corr(cross['fc_gimbal_corr'])}  "
+                f"fc-relative={corr(cross['fc_relative_corr'])}"
+            )
+            lines.append(
+                "    fc-ref-error: "
+                f"median={cross['fc_reference_error_median']:.3f}deg "
+                f"max={cross['fc_reference_error_max']:.3f}deg"
+            )
     return "\n".join(lines)
 
 
