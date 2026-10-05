@@ -44,6 +44,7 @@ dji-duml inspect dji_system.bin       # модель, версия, MD5/SHA-256;
 dji-duml plan M4T_UAV_17.02.05.01_pro.zip   # точные кадры будущей прошивки; ничего не отправляет
 dji-duml decode capture.pcap --device 47 --endpoint 0x04 --endpoint 0x85 --upgrade-only
 dji-duml topology --capture capture.pcap             # реальные DUML type:index из трафика
+dji-duml topology --seconds 10 -v                    # live fingerprint: Hz/len/unique/seq
 dji-duml topology --seconds 3 --probe 0x1f           # live: пассивно + явный read-only probe
 dji-duml extract capture.pcap -o files   # файлы, отправленные центру обновления, с проверкой
 dji-duml pack files -o 17.01.0516_dji_system.bin   # пакет для flash из извлечённых файлов
@@ -129,8 +130,12 @@ DUML topology: 184235 frames, 5 confirmed, 2 candidates
 ? 0x0A  PC idx=0  receiver-only  rx=900
 ```
 
-Для машинной обработки есть `--json`; там сохраняются счётчики tx/rx и
-наблюдавшиеся `cmd_set/cmd_id` по каждому адресу.
+Для машинной обработки есть `--json`; там сохраняются счётчики tx/rx,
+наблюдавшиеся `cmd_set/cmd_id` и fingerprints потоков. `-v/--verbose`
+показывает для каждого sender→receiver/cmd потока частоту, диапазон длины
+payload, число уникальных payload и поведение seq. Эти признаки нужны для
+эмпирического распознавания новых команд M4T, где legacy-имя может быть
+устаревшим или переиспользованным.
 
 ## Кадр DUML v1
 
