@@ -100,10 +100,13 @@ class GimbalParams:
     whose norm is consistently ~1.0 and whose w/z pair reproduces the legacy
     yaw on stationary captures, strongly identifying them as a quaternion.
 
-    Bytes 12..15 are verified on M4T as a millisecond monotonic timestamp:
-    across a stationary 20-second capture they advanced by 19900 while the
-    04/05 stream ran at 10 Hz. Bytes 16..23 and 40..end remain opaque until
-    independently verified.
+    Bytes 12..15 are verified on M4T as a millisecond monotonic timestamp.
+    Controlled pitch/yaw captures also establish an empirical yaw reference at
+    0x10 (signed int16, 0.01 degree) and a secondary pitch/joint angle at 0x14
+    (signed int16, 0.1 degree). The legacy 0x08 yaw angle behaves as relative
+    yaw: yaw_reference + relative_yaw predicts packet yaw with sub-degree median
+    error in controlled captures. Bytes 0x12..0x13, 0x16..0x17 and 40..end
+    remain unnamed until independently verified.
     """
 
     pitch_tenths: int
@@ -116,6 +119,10 @@ class GimbalParams:
     version_flags: int
     middle: bytes
     timestamp_ms: int | None
+    yaw_reference_hundredths: int | None
+    extension_12_raw: int | None
+    pitch_joint_tenths: int | None
+    extension_16_raw: int | None
     quaternion_wxyz: tuple[float, float, float, float] | None
     tail: bytes
 
@@ -133,6 +140,28 @@ class GimbalParams:
         if value & 0x8000:
             value -= 0x10000
         return value / 10.0
+
+    @property
+    def yaw_reference_deg(self) -> float | None:
+        """Empirical M4T yaw reference at payload 0x10, in 0.01 degrees."""
+        if self.yaw_reference_hundredths is None:
+            return None
+        return self.yaw_reference_hundredths / 100.0
+
+    @property
+    def pitch_joint_deg(self) -> float | None:
+        """Secondary pitch/joint angle at payload 0x14, in 0.1 degrees."""
+        if self.pitch_joint_tenths is None:
+            return None
+        return self.pitch_joint_tenths / 10.0
+
+    @property
+    def predicted_yaw_deg(self) -> float | None:
+        """Yaw predicted by the empirically verified reference+relative model."""
+        if self.yaw_reference_deg is None:
+            return None
+        value = self.yaw_reference_deg + self.relative_yaw_deg
+        return (value + 180.0) % 360.0 - 180.0
 
     @property
     def quaternion_norm(self) -> float | None:
@@ -205,6 +234,18 @@ def parse_gimbal_params(payload: bytes) -> GimbalParams:
 
     prefix = _GIMBAL_PREFIX.unpack_from(payload)
     timestamp_ms = int.from_bytes(payload[12:16], "little") if len(payload) >= 16 else None
+    yaw_reference_hundredths = (
+        int.from_bytes(payload[16:18], "little", signed=True) if len(payload) >= 18 else None
+    )
+    extension_12_raw = (
+        int.from_bytes(payload[18:20], "little", signed=True) if len(payload) >= 20 else None
+    )
+    pitch_joint_tenths = (
+        int.from_bytes(payload[20:22], "little", signed=True) if len(payload) >= 22 else None
+    )
+    extension_16_raw = (
+        int.from_bytes(payload[22:24], "little", signed=True) if len(payload) >= 24 else None
+    )
 
     quaternion = None
     if len(payload) >= 40:
@@ -213,5 +254,14 @@ def parse_gimbal_params(payload: bytes) -> GimbalParams:
     middle_end = 24 if len(payload) >= 24 else len(payload)
     middle = bytes(payload[_GIMBAL_PREFIX.size:middle_end])
     tail = bytes(payload[40:]) if len(payload) >= 40 else bytes(payload[middle_end:])
-    return GimbalParams(*prefix, middle=middle, timestamp_ms=timestamp_ms,
-                        quaternion_wxyz=quaternion, tail=tail)
+    return GimbalParams(
+        *prefix,
+        middle=middle,
+        timestamp_ms=timestamp_ms,
+        yaw_reference_hundredths=yaw_reference_hundredths,
+        extension_12_raw=extension_12_raw,
+        pitch_joint_tenths=pitch_joint_tenths,
+        extension_16_raw=extension_16_raw,
+        quaternion_wxyz=quaternion,
+        tail=tail,
+    )
