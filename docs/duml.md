@@ -552,21 +552,40 @@ while the numerical mount remains a reference calibration until reproduced on
 another airframe.
 
 
-### FLYC 03/43 opaque-tail diagnostics
+### FLYC 03/43 post-prefix diagnostics
 
-The verified FLYC 03/43 prefix ends at payload offset 0x23. M4T extends the
-payload to 84 bytes, leaving a 48-byte opaque tail at 0x24..0x53.
+The M4T packet is 84 bytes and the locally verified prefix ends at payload
+offset 0x23. Public legacy DJI dissectors, however, continue the historical
+03/43 layout to 50 bytes on P3 and 55 bytes on WM620. Therefore the entire
+0x24..0x53 area must not be described as a "new M4T tail":
 
-Verbose topology reports this tail conservatively without assigning semantic
-names:
+- 0x24..0x31 overlaps the historical 50-byte base layout;
+- 0x32..0x36 overlaps the historical WM620 five-byte extension;
+- only 0x37..0x53 is beyond the known 55-byte legacy layout.
 
-- tail-changed: absolute payload offsets that changed during the capture;
-- tail-bytes: byte min/max, unique-count and bit-change mask;
-- tail-u16: aligned little-endian u16/i16 ranges for changing words;
-- tail-corr: strongest absolute Pearson correlations (threshold 0.80) between
-  sliding raw u16/i16 windows and already verified height, velocity and
-  attitude signals.
+M4T is not assumed to preserve the old semantics. Verbose topology labels the
+historical slots with a trailing '?' and reports their raw behavior alongside
+the genuinely newer extension.
 
-Correlations are RE hints only. A field is not promoted into the typed decoder
-until its scale, sign, behavior and physical meaning survive controlled
-experiments.
+Diagnostics include:
+
+- tail-regions: changed offsets split into legacy-layout and M4T-extension;
+- legacy-slot-changes: changed historical slots, explicitly marked as
+  unverified candidates;
+- tail-bytes: byte min/max, unique-count, bit-change mask and modulo-256 step
+  fingerprints;
+- tail-u16: sliding (not only aligned) little-endian u16/i16 ranges, allowing
+  odd-offset words such as the historical unknown35 at 0x35;
+- tail-corr: strongest absolute Pearson correlations with verified
+  height/velocity/attitude;
+- tail-rate-corr: correlations with host-time-derived attitude/velocity rates.
+
+The first controlled M4T captures show all observed motion-related changes
+remaining at or before 0x36; offsets 0x37..0x53 stayed static in stationary and
+body-pitch runs. The legacy battery_remain slot at 0x28 changes through dozens
+of values even while stationary, so that historical semantic is clearly not
+safe to reuse on M4T.
+
+Correlations and legacy labels are RE hints only. A field is not promoted into
+the typed decoder until its scale, sign, behavior and physical meaning survive
+controlled experiments.
