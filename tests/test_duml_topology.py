@@ -215,6 +215,39 @@ class PassiveTopologyTests(unittest.TestCase):
             text,
         )
 
+    def test_unknown35_interval_fit_prefers_trapezoid_for_sampled_rate(self):
+        topology = Topology(host=0x2A)
+        raw_values = (0, 10, 20, 30, 40, 50)
+        roll_tenths = (0, 25, 100, 225, 400, 625)
+        for seq, (roll_raw, raw35) in enumerate(
+            zip(roll_tenths, raw_values), 1
+        ):
+            payload = bytearray(84)
+            struct.pack_into(
+                "<ddhhhhhhhBBI",
+                payload,
+                0,
+                0.0, 0.0,
+                0, 0, 0, 0,
+                0, roll_raw, 0,
+                0, 0, 0,
+            )
+            payload[0x35:0x37] = int(raw35).to_bytes(
+                2, "little", signed=True
+            )
+            topology.observe(
+                Frame(0x03, 0x0A, seq, 0x03, 0x43, bytes(payload), ack=0),
+                (seq - 1) * 0.5,
+            )
+
+        text = report(topology, verbose=True)
+        self.assertIn("tail-unknown35-interval-fit:", text)
+        self.assertIn(
+            "omega_x mode=trapezoid corr=+1.000 "
+            "scale=+1.00000 bias=+0.00 rmse=0.00",
+            text,
+        )
+
     def test_unknown35_fit_is_reported_below_global_threshold(self):
         topology = Topology(host=0x2A)
         rolls = (0, 80, 200, 360, 550, 750)
