@@ -4,7 +4,7 @@ from dji_duml import commands
 from dji_duml.frame import AckType, Frame, address
 from dji_duml.profiles import M4T
 from dji_duml.sim import SimulatedM4T
-from dji_duml.topology import Topology, addresses, from_frames, probe_versions
+from dji_duml.topology import Topology, addresses, from_frames, probe_versions, report
 
 
 class PassiveTopologyTests(unittest.TestCase):
@@ -43,6 +43,19 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertEqual(addresses((1, 4), (0, 2)),
                          (address(1, 0), address(1, 2),
                           address(4, 0), address(4, 2)))
+
+    def test_report_distinguishes_confirmed_and_candidates(self):
+        host = address(10, 1)
+        fc = address(3, 0)
+        gimbal = address(4, 1)
+        topology = from_frames([
+            Frame(fc, host, 1, 3, 0x43, ack=0),
+            Frame(host, gimbal, 2, 4, 0x02),
+        ], host=host)
+        text = report(topology)
+        self.assertIn("+ 0x03  Flight Controller idx=0", text)
+        self.assertIn("03/43 x1", text)
+        self.assertIn("? 0x24  Gimbal idx=1", text)
 
 
 class ActiveTopologyTests(unittest.TestCase):
