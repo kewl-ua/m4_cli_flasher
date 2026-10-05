@@ -1748,6 +1748,21 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                     "       tail-unknown35-fit: "
                                     + "  ".join(fit_parts)
                                 )
+                            if tail["unknown35_interval_fits"]:
+                                fit_parts = []
+                                for item in tail["unknown35_interval_fits"]:
+                                    fit_parts.append(
+                                        f"{item['signal']} "
+                                        f"mode={item['mode']} "
+                                        f"corr={item['corr']:+.3f} "
+                                        f"scale={item['slope']:+.5f} "
+                                        f"bias={item['intercept']:+.2f} "
+                                        f"rmse={item['rmse']:.2f}"
+                                    )
+                                lines.append(
+                                    "       tail-unknown35-interval-fit: "
+                                    + "  ".join(fit_parts)
+                                )
                             if tail["counter_candidates"]:
                                 counter_parts = [
                                     f"@{item['offset']:02X}="
