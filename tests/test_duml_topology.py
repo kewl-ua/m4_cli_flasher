@@ -200,6 +200,12 @@ class PassiveTopologyTests(unittest.TestCase):
         text = report(topology, verbose=True)
         self.assertIn("tail-body-rate-corr:", text)
         self.assertIn("i16@35->omega_x=+1.000", text)
+        self.assertIn("tail-body-rate-fit:", text)
+        self.assertIn(
+            "i16@35->omega_x lag=+0 corr=+1.000 "
+            "scale=+1.00000 bias=+0.00 rmse=0.00",
+            text,
+        )
 
     def test_flyc_tail_acceleration_correlation(self):
         topology = Topology(host=0x2A)
