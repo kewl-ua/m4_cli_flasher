@@ -442,12 +442,14 @@ fields in the 49-byte GIMBAL 04/05 push:
 - 0x0C..0x0F: monotonic timestamp in milliseconds.
 - 0x10..0x11: signed internal yaw-reference candidate, 0.01 degree. A body-yaw
   rotation test disproved the simple interpretation "this is FC/body yaw".
-- 0x14..0x15: secondary pitch/joint angle, signed int16, 0.1 degree. With the
-  airframe stationary it tracks packet pitch; when the whole airframe moves,
-  the useful model is body-relative and must be checked against FC pitch.
+- 0x14..0x15: body-relative pitch joint, signed int16, 0.1 degree.
+- 0x16..0x17: body-relative roll joint, signed int16, 0.1 degree.
 - 0x18..0x27: float32 quaternion w,x,y,z, unit norm.
 
-The fields at 0x12..0x13, 0x16..0x17 and 0x28..end remain unnamed. At high
+The 0x08 relative-yaw field, 0x14 pitch joint and 0x16 roll joint all track
+the Euler angles recovered from inverse(q_FC) * q_gimbal in controlled
+airframe-motion tests. The field at 0x12..0x13 and 0x28..end remain unnamed.
+At high
 pitch rates/extreme pitch angles the quaternion and legacy mechanical Euler
 angles can diverge transiently, so they must not be treated as identical
 measurements in all dynamic conditions.
@@ -459,7 +461,7 @@ Verbose topology pairs FLYC 03/43 and GIMBAL 04/05 by nearest host receive
 time. Body-relative orientation is solved in 3D, not by subtracting Euler
 components: FC Euler is converted to a quaternion, then
 q_relative = inverse(q_FC) * q_gimbal. The resulting relative pitch/roll/yaw
-is compared with joint@14, ext@16 and legacy relative-yaw@08.
+is compared with pitch-joint@14, roll-joint@16 and legacy relative-yaw@08.
 
 This matters at large pitch/roll angles, where component-wise Euler subtraction
 produces false errors because the axes are coupled. Field 0x10 is reported
