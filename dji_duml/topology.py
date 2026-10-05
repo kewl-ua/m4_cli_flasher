@@ -419,6 +419,40 @@ def _gimbal_angle_correlations(stream: TrafficStream) -> dict[str, dict[str, flo
     }
 
 
+def _gimbal_pitch_model(stream: TrafficStream) -> dict | None:
+    """Compare the M4T secondary pitch/joint field at 0x14 with packet pitch."""
+    if stream.cmd_set != 0x04 or stream.cmd_id != 0x05:
+        return None
+
+    from .telemetry import parse_gimbal_params
+
+    errors = []
+    joint = []
+    pitch = []
+    for _, payload in stream._samples:
+        try:
+            item = parse_gimbal_params(payload)
+        except UnexpectedReply:
+            continue
+        if item.pitch_joint_deg is None:
+            continue
+        joint.append(item.pitch_joint_deg)
+        pitch.append(item.attitude_deg[0])
+        errors.append(abs(item.pitch_joint_deg - item.attitude_deg[0]))
+
+    if not errors:
+        return None
+    ordered = sorted(errors)
+    median = ordered[len(ordered) // 2]
+    return {
+        "joint_range": _range(joint),
+        "pitch_range": _range(pitch),
+        "median_error": median,
+        "max_error": max(errors),
+        "correlation": _pearson(joint, pitch),
+    }
+
+
 def _gimbal_yaw_model(stream: TrafficStream) -> dict | None:
     """Test whether 0x10 is a yaw reference and legacy 0x08 is relative yaw."""
     if stream.cmd_set != 0x04 or stream.cmd_id != 0x05:
@@ -669,6 +703,14 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                             f"       decoded-prefix: att=({pitch:.1f},{roll:.1f},{yaw:.1f})deg "
                             f"mode=0x{gimbal.mode_flags:02X} limits=0x{gimbal.limit_flags:02X}"
                         )
+                        if gimbal.yaw_reference_deg is not None:
+                            line += (
+                                f" yaw-ref={gimbal.yaw_reference_deg:.2f}deg"
+                                f" rel-yaw={gimbal.relative_yaw_deg:.1f}deg"
+                                f" pred-yaw={gimbal.predicted_yaw_deg:.2f}deg"
+                            )
+                        if gimbal.pitch_joint_deg is not None:
+                            line += f" joint-pitch={gimbal.pitch_joint_deg:.1f}deg"
                         if gimbal.quaternion_wxyz is not None:
                             w, x, y, z = gimbal.quaternion_wxyz
                             line += (
@@ -736,6 +778,18 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                         corr_parts.append(f"{field_name}[{rendered}]")
                                 if corr_parts:
                                     lines.append("       angle-corr: " + "  ".join(corr_parts))
+                            pitch_model = _gimbal_pitch_model(stream)
+                            if pitch_model is not None:
+                                joint = pitch_model["joint_range"]
+                                packet_pitch = pitch_model["pitch_range"]
+                                corr = pitch_model["correlation"]
+                                corr_text = f"{corr:+.3f}" if corr is not None else "?"
+                                lines.append(
+                                    f"       pitch-model: packet={packet_pitch[0]:.1f}..{packet_pitch[1]:.1f}deg "
+                                    f"joint@14={joint[0]:.1f}..{joint[1]:.1f}deg "
+                                    f"corr={corr_text} median-error={pitch_model['median_error']:.3f}deg "
+                                    f"max-error={pitch_model['max_error']:.3f}deg"
+                                )
                             yaw_model = _gimbal_yaw_model(stream)
                             if yaw_model is not None:
                                 ref = yaw_model["reference_range"]
