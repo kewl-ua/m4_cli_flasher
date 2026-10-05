@@ -207,7 +207,7 @@ class PassiveTopologyTests(unittest.TestCase):
             text,
         )
         self.assertIn("tail-motion:", text)
-        self.assertIn("dominant=omega_x", text)
+        self.assertIn("dominant=roll/x", text)
         self.assertIn("tail-unknown35-fit:", text)
         self.assertIn(
             "omega_x lag=+0 corr=+1.000 "
