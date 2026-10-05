@@ -497,3 +497,39 @@ halves. Only after those held-out errors are established is the descriptive
 mount quaternion fitted on the full window. This avoids the strong temporal
 leakage of alternating 10 Hz samples. The report prints mount-fit blocked-CV
 median/max error and the best mounting quaternion as Euler angles.
+
+
+### Reusable M4T gimbal kinematics API
+
+The experimentally recovered frame chain is exposed separately from packet
+decoding in dji_duml.kinematics. Controlled captures with blocked
+cross-validation support:
+
+    q_gimbal_world =
+        q_fc_world
+        * q_mount
+        * Rz(relative_yaw@08)
+        * Rx(roll_joint@16)
+        * Ry(pitch_joint@14)
+
+The left-side mount and yaw/roll/pitch joint order survived independent mixed
+body-motion runs. The observed stream alignment was consistently about +30 ms.
+The numerical mount is deliberately exposed as a REFERENCE preset rather than
+a universal airframe constant; cross-airframe equality has not been established.
+
+Example:
+
+    from dji_duml import M4T_REFERENCE_GIMBAL_KINEMATICS as kin
+
+    predicted_q = kin.world_orientation(fc.attitude_deg, gimbal)
+    predicted_euler = kin.world_euler_deg(fc.attitude_deg, gimbal)
+    error_deg = kin.orientation_error_deg(fc.attitude_deg, gimbal)
+
+    # Independent inverse check using FC attitude + measured 04/05 quaternion:
+    solved_pitch, solved_roll, solved_yaw = kin.measured_joint_angles_deg(
+        fc.attitude_deg, gimbal
+    )
+
+The inverse decomposition removes q_mount first and analytically decomposes the
+verified Rz(yaw) * Rx(roll) * Ry(pitch) chain. It is singular at roll +/-90
+degrees, as expected for this Euler parameterization.
