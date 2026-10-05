@@ -465,6 +465,22 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
     if len(fc_rows) < 3 or len(gimbal_rows) < 3:
         return None
 
+    raw_fc_axes = list(zip(*(row[1] for row in fc_rows)))
+    axis_labels = ("pitch", "roll", "yaw")
+    axis_spans = {
+        label: max(values) - min(values)
+        for label, values in zip(axis_labels, raw_fc_axes)
+    }
+    excited_axes = tuple(
+        label for label in axis_labels if axis_spans[label] >= 10.0
+    )
+    if len(excited_axes) < 2:
+        return {
+            "insufficient_excitation": True,
+            "axis_spans": axis_spans,
+            "excited_axes": excited_axes,
+        }
+
     fc_times = [row[0] for row in fc_rows]
     joint_orders = (
         ("yaw", "pitch", "roll"),
@@ -1402,6 +1418,19 @@ def report(topology: Topology, *, commands_per_module: int = 8,
     if verbose:
         cross = _cross_attitude_diagnostics(topology)
         if cross is not None:
+            if cross.get("insufficient_excitation"):
+                spans = cross["axis_spans"]
+                excited = ",".join(cross["excited_axes"]) or "none"
+                lines.append(
+                    "cross-attitude: skipped kinematic fit "
+                    f"(insufficient excitation; "
+                    f"spans pitch={spans['pitch']:.1f} "
+                    f"roll={spans['roll']:.1f} "
+                    f"yaw={spans['yaw']:.1f}deg; "
+                    f"excited={excited})"
+                )
+                return "\n".join(lines)
+
             def corr(value):
                 return f"{value:+.3f}" if value is not None else "?"
             fc_pitch, fc_roll, fc_yaw = cross["fc_ranges"]
