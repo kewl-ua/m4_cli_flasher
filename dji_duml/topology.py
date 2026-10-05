@@ -1205,6 +1205,31 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                 f"       tail-changed: {_offset_ranges(tail['changed'])} "
                                 f"samples={tail['samples']}"
                             )
+                            lines.append(
+                                "       tail-regions: "
+                                f"legacy-layout@24..36={_offset_ranges(tail['legacy_changed'])}  "
+                                f"m4t-extension@37..53={_offset_ranges(tail['m4t_changed'])}"
+                            )
+                            changed_legacy = [
+                                item for item in tail["legacy_slots"] if item["changed"]
+                            ]
+                            if changed_legacy:
+                                legacy_parts = []
+                                for item in changed_legacy:
+                                    ulo, uhi = item["u_range"]
+                                    ilo, ihi = item["i_range"]
+                                    value = (
+                                        f"{ulo}..{uhi}"
+                                        if item["size"] == 1
+                                        else f"u={ulo}..{uhi}/i={ilo}..{ihi}"
+                                    )
+                                    legacy_parts.append(
+                                        f"{item['name']}?@{item['offset']:02X}="
+                                        f"{value}/uniq{item['unique']}"
+                                    )
+                                lines.append(
+                                    "       legacy-slot-changes: " + "  ".join(legacy_parts)
+                                )
                             if tail["byte_ranges"]:
                                 byte_parts = []
                                 for offset in sorted(tail["byte_ranges"])[:16]:
@@ -1219,6 +1244,16 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                 lines.append(
                                     "       tail-bytes: " + "  ".join(byte_parts)
                                 )
+                                step_parts = []
+                                for offset in sorted(tail["byte_steps"])[:12]:
+                                    steps = ",".join(
+                                        f"+{delta}:{count}" for delta, count in tail["byte_steps"][offset]
+                                    )
+                                    step_parts.append(f"@{offset:02X}[{steps}]")
+                                if step_parts:
+                                    lines.append(
+                                        "       tail-byte-step: " + "  ".join(step_parts)
+                                    )
                             if tail["words"]:
                                 word_parts = []
                                 for item in tail["words"][:12]:
@@ -1243,6 +1278,15 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                 ]
                                 lines.append(
                                     "       tail-corr: " + "  ".join(corr_parts)
+                                )
+                            if tail["rate_correlations"]:
+                                corr_parts = [
+                                    f"{item['type']}@{item['offset']:02X}"
+                                    f"->{item['signal']}={item['corr']:+.3f}"
+                                    for item in tail["rate_correlations"]
+                                ]
+                                lines.append(
+                                    "       tail-rate-corr: " + "  ".join(corr_parts)
                                 )
                 elif stream.cmd_set == 0x04 and stream.cmd_id == 0x05:
                     from .telemetry import parse_gimbal_params
