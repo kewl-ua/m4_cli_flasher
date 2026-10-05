@@ -416,6 +416,9 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         euler_deg_to_quaternion,
         parse_flyc_osd_general,
         parse_gimbal_params,
+        quaternion_angular_distance_deg,
+        quaternion_axis_angle_deg,
+        quaternion_multiply,
         quaternion_to_euler_deg,
         relative_quaternion,
     )
@@ -466,7 +469,7 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
             body_q = euler_deg_to_quaternion(fc_att)
             rel_q = relative_quaternion(body_q, item.quaternion_wxyz)
             rel_att = quaternion_to_euler_deg(rel_q)
-            pairs.append((skew, fc_att, item, rel_att))
+            pairs.append((skew, fc_att, item, rel_att, rel_q))
 
     if len(pairs) < 3:
         return None
@@ -509,6 +512,41 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         for field, solved in zip(relative_yaw, rel_q_yaw)
     ]
 
+    joint_orders = (
+        ("yaw", "pitch", "roll"),
+        ("yaw", "roll", "pitch"),
+        ("pitch", "yaw", "roll"),
+        ("pitch", "roll", "yaw"),
+        ("roll", "yaw", "pitch"),
+        ("roll", "pitch", "yaw"),
+    )
+    axis_for = {"pitch": "y", "roll": "x", "yaw": "z"}
+    order_scores = []
+    for order in joint_orders:
+        errors = []
+        for _, _, item, _, solved_q in pairs:
+            if item.pitch_joint_deg is None or item.roll_joint_deg is None:
+                continue
+            angles = {
+                "pitch": item.pitch_joint_deg,
+                "roll": item.roll_joint_deg,
+                "yaw": item.relative_yaw_deg,
+            }
+            candidate = (1.0, 0.0, 0.0, 0.0)
+            for name in order:
+                candidate = quaternion_multiply(
+                    candidate,
+                    quaternion_axis_angle_deg(axis_for[name], angles[name]),
+                )
+            errors.append(quaternion_angular_distance_deg(candidate, solved_q))
+        if errors:
+            order_scores.append({
+                "order": "*".join(order),
+                "median_error": _median(errors),
+                "max_error": max(errors),
+            })
+    order_scores.sort(key=lambda item: (item["median_error"], item["max_error"]))
+
     fc_yaw_u = _unwrap_degrees(fc_yaw)
     g_yaw_u = _unwrap_degrees(g_yaw)
     ref10_u = _unwrap_degrees(ref10)
@@ -537,6 +575,7 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         "ref10_fc_corr": _pearson(ref10_u, fc_yaw_u),
         "ref10_gimbal_corr": _pearson(ref10_u, g_yaw_u),
         "ref10_range": _range(ref10_u),
+        "joint_order_scores": order_scores,
     }
 
 
@@ -944,6 +983,16 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                 f"err={cross['relative_yaw_error_median']:.2f}/"
                 f"{cross['relative_yaw_error_max']:.2f}deg"
             )
+            order_scores = cross.get("joint_order_scores") or []
+            if order_scores:
+                best = order_scores[:3]
+                lines.append(
+                    "    joint-kinematics: " + "  ".join(
+                        f"{item['order']}={item['median_error']:.2f}/"
+                        f"{item['max_error']:.2f}deg"
+                        for item in best
+                    ) + " median/max"
+                )
             ref10 = cross["ref10_range"]
             lines.append(
                 "    field@10 candidate: "
