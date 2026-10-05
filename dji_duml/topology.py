@@ -418,7 +418,9 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         parse_flyc_osd_general,
         parse_gimbal_params,
         quaternion_angular_distance_deg,
+        quaternion_average,
         quaternion_axis_angle_deg,
+        quaternion_conjugate,
         quaternion_multiply,
         quaternion_slerp,
         quaternion_to_euler_deg,
@@ -510,6 +512,43 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
             bracket_ms.append(span * 1000.0)
         return rows, bracket_ms
 
+    def fit_mount(rows, order, side):
+        train = rows[::2]
+        test = rows[1::2]
+        if len(train) < 3 or len(test) < 3:
+            return None
+        residuals = []
+        for _, _, item, _, rel_q in train:
+            joint_q = candidate_joint_q(item, order)
+            if side == "left":
+                # rel = mount * joints
+                residuals.append(
+                    quaternion_multiply(rel_q, quaternion_conjugate(joint_q))
+                )
+            else:
+                # rel = joints * mount
+                residuals.append(
+                    quaternion_multiply(quaternion_conjugate(joint_q), rel_q)
+                )
+        mount_q = quaternion_average(residuals)
+        errors = []
+        for _, _, item, _, rel_q in test:
+            joint_q = candidate_joint_q(item, order)
+            predicted = (
+                quaternion_multiply(mount_q, joint_q)
+                if side == "left"
+                else quaternion_multiply(joint_q, mount_q)
+            )
+            errors.append(quaternion_angular_distance_deg(predicted, rel_q))
+        return {
+            "side": side,
+            "mount_q": mount_q,
+            "median_error": _median(errors),
+            "max_error": max(errors),
+            "samples": len(errors),
+        }
+
+    mount_scores = []
     lag_scores = []
     for lag_ms in range(-300, 301, 10):
         rows, _ = aligned_rows(lag_ms / 1000.0)
@@ -527,8 +566,16 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
                 "max_error": max(errors),
                 "samples": len(errors),
             })
+            for side in ("left", "right"):
+                fitted = fit_mount(rows, order, side)
+                if fitted is not None:
+                    fitted.update({
+                        "lag_ms": lag_ms,
+                        "order": "*".join(order),
+                    })
+                    mount_scores.append(fitted)
 
-    if not lag_scores:
+    if not lag_scores or not mount_scores:
         return None
 
     lag_scores.sort(
@@ -538,12 +585,19 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
             abs(item["lag_ms"]),
         )
     )
-    best = lag_scores[0]
-    best_rows, bracket_ms = aligned_rows(best["lag_ms"] / 1000.0)
+    mount_scores.sort(
+        key=lambda item: (
+            item["median_error"],
+            item["max_error"],
+            abs(item["lag_ms"]),
+        )
+    )
+    best_mount = mount_scores[0]
+    best_rows, bracket_ms = aligned_rows(best_mount["lag_ms"] / 1000.0)
     if len(best_rows) < 3:
         return None
 
-    # Rank orders again at the chosen temporal alignment.
+    # Rank raw orders and mount-corrected orders at the chosen temporal alignment.
     order_scores = []
     for order in joint_orders:
         errors = [
@@ -552,12 +606,27 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         ]
         order_scores.append({
             "order": "*".join(order),
-            "lag_ms": best["lag_ms"],
+            "lag_ms": best_mount["lag_ms"],
             "median_error": _median(errors),
             "max_error": max(errors),
             "samples": len(errors),
         })
     order_scores.sort(key=lambda item: (item["median_error"], item["max_error"]))
+
+    mount_order_scores = []
+    for order in joint_orders:
+        for side in ("left", "right"):
+            fitted = fit_mount(best_rows, order, side)
+            if fitted is None:
+                continue
+            fitted.update({
+                "order": "*".join(order),
+                "lag_ms": best_mount["lag_ms"],
+            })
+            mount_order_scores.append(fitted)
+    mount_order_scores.sort(
+        key=lambda item: (item["median_error"], item["max_error"])
+    )
 
     fc_pitch = [row[1][0] for row in best_rows]
     fc_roll = [row[1][1] for row in best_rows]
@@ -596,7 +665,7 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
 
     return {
         "pairs": len(best_rows),
-        "best_lag_ms": best["lag_ms"],
+        "best_lag_ms": best_mount["lag_ms"],
         "fc_bracket_median_ms": _median(bracket_ms),
         "fc_bracket_max_ms": max(bracket_ms),
         "fc_ranges": (_range(fc_pitch), _range(fc_roll), _range(fc_yaw_u)),
@@ -620,6 +689,8 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         "ref10_gimbal_corr": _pearson(ref10_u, g_yaw_u),
         "ref10_range": _range(ref10_u),
         "joint_order_scores": order_scores,
+        "mount_order_scores": mount_order_scores,
+        "best_mount": best_mount,
         "lag_order_scores": lag_scores,
     }
 
@@ -1039,6 +1110,25 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                         for item in best
                     ) + " median/max"
                 )
+            mount_scores = cross.get("mount_order_scores") or []
+            if mount_scores:
+                best_mounts = mount_scores[:3]
+                lines.append(
+                    "    mount-fit: " + "  ".join(
+                        f"{item['side']}:{item['order']}="
+                        f"{item['median_error']:.2f}/{item['max_error']:.2f}deg"
+                        for item in best_mounts
+                    ) + " cv-median/max"
+                )
+                best_mount = cross.get("best_mount")
+                if best_mount is not None:
+                    from .telemetry import quaternion_to_euler_deg
+                    mp, mr, my = quaternion_to_euler_deg(best_mount["mount_q"])
+                    lines.append(
+                        f"    best-mount: side={best_mount['side']} "
+                        f"order={best_mount['order']} lag={best_mount['lag_ms']:+d}ms "
+                        f"euler=({mp:.2f},{mr:.2f},{my:.2f})deg"
+                    )
             ref10 = cross["ref10_range"]
             lines.append(
                 "    field@10 candidate: "
