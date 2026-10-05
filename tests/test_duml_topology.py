@@ -59,10 +59,16 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertEqual(stream.unique_payloads, 2)
         self.assertAlmostEqual(stream.rate_hz, 2.0)
         self.assertEqual(dict(stream.seq_steps), {"+1": 1, "other": 1})
+        self.assertEqual(dict(stream.seq_deltas), {1: 1, 2: 1})
+        self.assertEqual(stream.sample_payload, b"abc")
+        self.assertEqual(stream.changed_offsets, {2})
         verbose = report(topology, verbose=True)
         self.assertIn("2.0 Hz", verbose)
         self.assertIn("unique=2", verbose)
         self.assertIn("seq[+1:1/same:0/other:1]", verbose)
+        self.assertIn("sample: 61 62 63", verbose)
+        self.assertIn("changed: 0x02", verbose)
+        self.assertIn("seq-delta[+1:1,+2:1]", verbose)
 
     def test_report_distinguishes_confirmed_and_candidates(self):
         host = address(10, 1)
