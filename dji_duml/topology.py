@@ -472,7 +472,7 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         for label, values in zip(axis_labels, raw_fc_axes)
     }
     excited_axes = tuple(
-        label for label in axis_labels if axis_spans[label] >= 10.0
+        label for label in axis_labels if axis_spans[label] >= 20.0
     )
     if len(excited_axes) < 2:
         return {
