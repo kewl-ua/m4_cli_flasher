@@ -9,6 +9,7 @@ from dji_duml.telemetry import (
     euler_deg_to_quaternion,
     parse_gimbal_params,
     quaternion_multiply,
+    quaternion_slerp,
     quaternion_to_euler_deg,
     relative_quaternion,
 )
@@ -85,6 +86,15 @@ class GimbalParamsTests(unittest.TestCase):
         self.assertLess(item.quaternion_orientation_error_deg, 0.1)
         self.assertAlmostEqual(item.relative_yaw_deg, 27.4, places=1)
         self.assertAlmostEqual(item.yaw_reference_deg, -86.85, places=2)
+
+    def test_quaternion_slerp_midpoint(self):
+        left = euler_deg_to_quaternion((0.0, 0.0, 0.0))
+        right = euler_deg_to_quaternion((0.0, 0.0, 90.0))
+        middle = quaternion_slerp(left, right, 0.5)
+        pitch, roll, yaw = quaternion_to_euler_deg(middle)
+        self.assertAlmostEqual(pitch, 0.0, places=6)
+        self.assertAlmostEqual(roll, 0.0, places=6)
+        self.assertAlmostEqual(yaw, 45.0, places=6)
 
     def test_quaternion_frame_composition_recovers_relative_orientation(self):
         body = (35.0, -20.0, -60.0)
