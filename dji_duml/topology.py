@@ -513,39 +513,62 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         return rows, bracket_ms
 
     def fit_mount(rows, order, side):
-        train = rows[::2]
-        test = rows[1::2]
-        if len(train) < 3 or len(test) < 3:
+        """Bidirectional blocked CV for a constant mounting transform.
+
+        Fit on the first contiguous half and validate on the second, then
+        reverse the roles. The reported mount itself is fitted on all rows
+        only after validation scores are established.
+        """
+        midpoint = len(rows) // 2
+        first = rows[:midpoint]
+        second = rows[midpoint:]
+        if len(first) < 3 or len(second) < 3:
             return None
-        residuals = []
-        for _, _, item, _, rel_q in train:
-            joint_q = candidate_joint_q(item, order)
-            if side == "left":
-                # rel = mount * joints
-                residuals.append(
-                    quaternion_multiply(rel_q, quaternion_conjugate(joint_q))
+
+        def residuals_for(source):
+            residuals = []
+            for _, _, item, _, rel_q in source:
+                joint_q = candidate_joint_q(item, order)
+                if side == "left":
+                    # rel = mount * joints
+                    residuals.append(
+                        quaternion_multiply(rel_q, quaternion_conjugate(joint_q))
+                    )
+                else:
+                    # rel = joints * mount
+                    residuals.append(
+                        quaternion_multiply(quaternion_conjugate(joint_q), rel_q)
+                    )
+            return residuals
+
+        def validation_errors(mount_q, target):
+            errors = []
+            for _, _, item, _, rel_q in target:
+                joint_q = candidate_joint_q(item, order)
+                predicted = (
+                    quaternion_multiply(mount_q, joint_q)
+                    if side == "left"
+                    else quaternion_multiply(joint_q, mount_q)
                 )
-            else:
-                # rel = joints * mount
-                residuals.append(
-                    quaternion_multiply(quaternion_conjugate(joint_q), rel_q)
-                )
-        mount_q = quaternion_average(residuals)
-        errors = []
-        for _, _, item, _, rel_q in test:
-            joint_q = candidate_joint_q(item, order)
-            predicted = (
-                quaternion_multiply(mount_q, joint_q)
-                if side == "left"
-                else quaternion_multiply(joint_q, mount_q)
-            )
-            errors.append(quaternion_angular_distance_deg(predicted, rel_q))
+                errors.append(quaternion_angular_distance_deg(predicted, rel_q))
+            return errors
+
+        mount_first = quaternion_average(residuals_for(first))
+        mount_second = quaternion_average(residuals_for(second))
+        errors = (
+            validation_errors(mount_first, second)
+            + validation_errors(mount_second, first)
+        )
+
+        # After cross-validation, estimate the descriptive mount from all rows.
+        mount_q = quaternion_average(residuals_for(rows))
         return {
             "side": side,
             "mount_q": mount_q,
             "median_error": _median(errors),
             "max_error": max(errors),
             "samples": len(errors),
+            "cv": "blocked-halves",
         }
 
     mount_scores = []
@@ -1118,7 +1141,7 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                         f"{item['side']}:{item['order']}="
                         f"{item['median_error']:.2f}/{item['max_error']:.2f}deg"
                         for item in best_mounts
-                    ) + " cv-median/max"
+                    ) + " blocked-cv median/max"
                 )
                 best_mount = cross.get("best_mount")
                 if best_mount is not None:
