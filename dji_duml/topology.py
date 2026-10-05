@@ -1184,6 +1184,69 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
                 if abs(best["corr"]) >= 0.80:
                     body_rate_fits.append(best)
 
+    unknown35_interval_fits = []
+    if end >= 0x37:
+        unknown35_values = [
+            float(int.from_bytes(
+                payload[0x35:0x37],
+                "little",
+                signed=True,
+            ))
+            for _, payload, _ in rows
+        ]
+        interval_modes = {
+            "previous": lambda index: unknown35_values[index - 1],
+            "current": lambda index: unknown35_values[index],
+            "trapezoid": lambda index: (
+                unknown35_values[index - 1] + unknown35_values[index]
+            ) / 2.0,
+        }
+        for signal in ("omega_x", "omega_y", "omega_z"):
+            target = body_rate_signals[signal]
+            best = None
+            for mode, raw_for_index in interval_modes.items():
+                xs = []
+                ys = []
+                for index in range(1, len(rows)):
+                    target_value = target[index]
+                    if target_value is None:
+                        continue
+                    xs.append(raw_for_index(index))
+                    ys.append(float(target_value))
+                fitted = linear_fit(xs, ys)
+                if fitted is None:
+                    continue
+                slope, intercept, rmse, corr = fitted
+                if corr is None:
+                    continue
+                candidate = {
+                    "signal": signal,
+                    "mode": mode,
+                    "slope": slope,
+                    "intercept": intercept,
+                    "rmse": rmse,
+                    "corr": corr,
+                    "samples": len(xs),
+                }
+                if best is None or (
+                    abs(candidate["corr"]),
+                    -candidate["rmse"],
+                ) > (
+                    abs(best["corr"]),
+                    -best["rmse"],
+                ):
+                    best = candidate
+            if best is not None:
+                unknown35_interval_fits.append(best)
+
+    unknown35_interval_fits.sort(
+        key=lambda item: (
+            -abs(item["corr"]),
+            item["rmse"],
+            item["signal"],
+        )
+    )
+
     body_rate_fits.sort(
         key=lambda item: (
             -abs(item["corr"]),
@@ -1277,6 +1340,7 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         "body_rate_correlations": body_rate_correlations[:12],
         "body_rate_fits": body_rate_fits[:12],
         "unknown35_body_rate_fits": unknown35_body_rate_fits,
+        "unknown35_interval_fits": unknown35_interval_fits,
         "motion_axis_rms": axis_activity,
         "motion_dominant_axis": dominant_axis,
         "motion_purity": motion_purity,
