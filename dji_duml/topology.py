@@ -447,6 +447,10 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                 f" q=({w:.6f},{x:.6f},{y:.6f},{z:.6f}) "
                                 f"|q|={gimbal.quaternion_norm:.6f}"
                             )
+                            q_pitch, q_roll, q_yaw = gimbal.quaternion_euler_deg
+                            line += (
+                                f" q-euler=({q_pitch:.2f},{q_roll:.2f},{q_yaw:.2f})deg"
+                            )
                         line += f" opaque={len(gimbal.middle) + len(gimbal.tail)}B"
                         lines.append(line)
                 lines.append(
