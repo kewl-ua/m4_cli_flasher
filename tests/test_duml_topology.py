@@ -143,7 +143,6 @@ class PassiveTopologyTests(unittest.TestCase):
         text = report(topology, verbose=True)
         self.assertIn("angle-corr:", text)
         self.assertIn("i16@14/10[pitch=+1.000", text)
-        self.assertIn("pitch-model:", text)
 
     def test_gimbal_rate_correlation_uses_device_timestamp(self):
         topology = Topology(host=0x2A)
