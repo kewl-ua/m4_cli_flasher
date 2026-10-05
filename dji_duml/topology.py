@@ -32,6 +32,7 @@ DEVICE_TYPES = {
 }
 
 MAX_UNIQUE_PAYLOADS = 4096
+MAX_SEQ_DELTAS = 64
 
 
 @dataclass
@@ -50,8 +51,13 @@ class TrafficStream:
     payload_max: int | None = None
     _payloads: set[bytes] = field(default_factory=set, repr=False)
     payloads_capped: bool = False
+    _first_payload: bytes | None = field(default=None, repr=False)
+    changed_offsets: set[int] = field(default_factory=set)
+    payload_length_changed: bool = False
     _previous_seq: int | None = field(default=None, repr=False)
     seq_steps: Counter[str] = field(default_factory=Counter)
+    seq_deltas: Counter[int] = field(default_factory=Counter)
+    seq_deltas_capped: bool = False
 
     def observe(self, frame: Frame, timestamp: float | None) -> None:
         self.count += 1
@@ -65,6 +71,20 @@ class TrafficStream:
         self.payload_max = size if self.payload_max is None else max(self.payload_max, size)
 
         payload = bytes(frame.payload)
+        if self._first_payload is None:
+            self._first_payload = payload
+        else:
+            common = min(len(self._first_payload), len(payload))
+            self.changed_offsets.update(
+                index for index in range(common)
+                if self._first_payload[index] != payload[index]
+            )
+            if len(self._first_payload) != len(payload):
+                self.payload_length_changed = True
+                self.changed_offsets.update(
+                    range(common, max(len(self._first_payload), len(payload)))
+                )
+
         if payload not in self._payloads:
             if len(self._payloads) < MAX_UNIQUE_PAYLOADS:
                 self._payloads.add(payload)
@@ -79,11 +99,19 @@ class TrafficStream:
                 self.seq_steps["same"] += 1
             else:
                 self.seq_steps["other"] += 1
+            if delta in self.seq_deltas or len(self.seq_deltas) < MAX_SEQ_DELTAS:
+                self.seq_deltas[delta] += 1
+            else:
+                self.seq_deltas_capped = True
         self._previous_seq = frame.seq
 
     @property
     def unique_payloads(self) -> int:
         return len(self._payloads)
+
+    @property
+    def sample_payload(self) -> bytes:
+        return self._first_payload or b""
 
     @property
     def duration(self) -> float | None:
@@ -111,7 +139,12 @@ class TrafficStream:
             "payload_len": {"min": self.payload_min, "max": self.payload_max},
             "unique_payloads": self.unique_payloads,
             "unique_payloads_exact": not self.payloads_capped,
+            "sample_payload": self.sample_payload.hex(),
+            "changed_offsets": sorted(self.changed_offsets),
+            "payload_length_changed": self.payload_length_changed,
             "seq_steps": dict(self.seq_steps),
+            "seq_deltas": {str(delta): count for delta, count in self.seq_deltas.items()},
+            "seq_deltas_exact": not self.seq_deltas_capped,
         }
 
 
@@ -274,6 +307,25 @@ def _label(topology: Topology, node: Module) -> str:
     return f"{role} [{legacy}]" if role else legacy
 
 
+def _offset_ranges(offsets: set[int]) -> str:
+    if not offsets:
+        return "-"
+    values = sorted(offsets)
+    ranges = []
+    start = previous = values[0]
+    for value in values[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        ranges.append((start, previous))
+        start = previous = value
+    ranges.append((start, previous))
+    return ",".join(
+        f"0x{start:02X}" if start == end else f"0x{start:02X}-0x{end:02X}"
+        for start, end in ranges
+    )
+
+
 def report(topology: Topology, *, commands_per_module: int = 8,
            verbose: bool = False) -> str:
     """Human-readable topology report; verbose adds per-stream fingerprints."""
@@ -311,10 +363,27 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                     f"{name}:{stream.seq_steps.get(name, 0)}"
                     for name in ("+1", "same", "other")
                 )
+                deltas = ",".join(
+                    f"+{delta}:{count}"
+                    for delta, count in stream.seq_deltas.most_common(5)
+                ) or "-"
+                if stream.seq_deltas_capped:
+                    deltas += ",..."
                 kind = "response" if stream.response else "request/push"
                 lines.append(
                     f"    -> 0x{stream.receiver:02X}  {stream.cmd_set:02X}/{stream.cmd_id:02X}  "
                     f"{kind}  n={stream.count}  {rate}  {payload}  {unique}  seq[{seq}]"
+                )
+                sample = stream.sample_payload[:64].hex(" ")
+                if len(stream.sample_payload) > 64:
+                    sample += " ..."
+                lines.append(
+                    f"       sample: {sample or '-'}"
+                )
+                lines.append(
+                    f"       changed: {_offset_ranges(stream.changed_offsets)}"
+                    + (" (length varies)" if stream.payload_length_changed else "")
+                    + f"  seq-delta[{deltas}]"
                 )
 
     for node in topology.candidates:
