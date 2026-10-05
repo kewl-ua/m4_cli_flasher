@@ -65,6 +65,7 @@ class PassiveTopologyTests(unittest.TestCase):
         verbose = report(topology, verbose=True)
         self.assertIn("2.0 Hz", verbose)
         self.assertIn("unique=2", verbose)
+        self.assertIn("ack[none:3]", verbose)
         self.assertIn("seq[+1:1/same:0/other:1]", verbose)
         self.assertIn("sample: 61 62 63", verbose)
         self.assertIn("changed: 0x02", verbose)
