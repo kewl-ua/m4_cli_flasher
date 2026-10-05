@@ -173,6 +173,33 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("tail-counter-like:", text)
         self.assertIn("@28=50.00/s", text)
 
+    def test_flyc_tail_body_rate_correlation_uses_quaternion_delta(self):
+        topology = Topology(host=0x2A)
+        rolls = (0, 100, 300, 600, 1000)
+        omega_raw = (0, 20, 40, 60, 80)
+        for seq, (roll_tenths, raw35) in enumerate(zip(rolls, omega_raw), 1):
+            payload = bytearray(84)
+            struct.pack_into(
+                "<ddhhhhhhhBBI",
+                payload,
+                0,
+                0.0, 0.0,
+                0, 0, 0, 0,
+                0, roll_tenths, 0,
+                0, 0, 0,
+            )
+            payload[0x35:0x37] = int(raw35).to_bytes(
+                2, "little", signed=True
+            )
+            topology.observe(
+                Frame(0x03, 0x0A, seq, 0x03, 0x43, bytes(payload), ack=0),
+                seq * 0.5,
+            )
+
+        text = report(topology, verbose=True)
+        self.assertIn("tail-body-rate-corr:", text)
+        self.assertIn("i16@35->omega_x=+1.000", text)
+
     def test_flyc_tail_acceleration_correlation(self):
         topology = Topology(host=0x2A)
         rows = (
