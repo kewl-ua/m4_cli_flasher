@@ -410,8 +410,8 @@ def _find_stream(topology: Topology, cmd_set: int, cmd_id: int) -> TrafficStream
     return max(matches, key=lambda stream: stream.count)
 
 
-def _cross_yaw_diagnostics(topology: Topology) -> dict | None:
-    """Pair FLYC 03/43 with GIMBAL 04/05 by nearest host receive timestamp."""
+def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
+    """Pair FLYC 03/43 with GIMBAL 04/05 and test body-relative angle models."""
     from .telemetry import parse_flyc_osd_general, parse_gimbal_params
 
     fc_stream = _find_stream(topology, 0x03, 0x43)
@@ -427,7 +427,7 @@ def _cross_yaw_diagnostics(topology: Topology) -> dict | None:
             item = parse_flyc_osd_general(payload)
         except UnexpectedReply:
             continue
-        fc_rows.append((timestamp, item.attitude_deg[2]))
+        fc_rows.append((timestamp, item.attitude_deg))
 
     gimbal_rows = []
     for timestamp, payload in gimbal_stream._samples:
@@ -437,21 +437,14 @@ def _cross_yaw_diagnostics(topology: Topology) -> dict | None:
             item = parse_gimbal_params(payload)
         except UnexpectedReply:
             continue
-        if item.yaw_reference_deg is None:
-            continue
-        gimbal_rows.append((
-            timestamp,
-            item.attitude_deg[2],
-            item.yaw_reference_deg,
-            item.relative_yaw_deg,
-        ))
+        gimbal_rows.append((timestamp, item))
 
     if len(fc_rows) < 3 or len(gimbal_rows) < 3:
         return None
 
     pairs = []
     gi = 0
-    for fc_time, fc_yaw in fc_rows:
+    for fc_time, fc_att in fc_rows:
         while gi + 1 < len(gimbal_rows):
             here = abs(gimbal_rows[gi][0] - fc_time)
             nxt = abs(gimbal_rows[gi + 1][0] - fc_time)
@@ -459,39 +452,70 @@ def _cross_yaw_diagnostics(topology: Topology) -> dict | None:
                 gi += 1
             else:
                 break
-        g_time, g_yaw, reference, relative = gimbal_rows[gi]
+        g_time, item = gimbal_rows[gi]
         skew = abs(g_time - fc_time)
         if skew <= 0.30:
-            pairs.append((skew, fc_yaw, g_yaw, reference, relative))
+            pairs.append((skew, fc_att, item))
 
     if len(pairs) < 3:
         return None
 
     skews_ms = [row[0] * 1000.0 for row in pairs]
-    fc = [row[1] for row in pairs]
-    gimbal = [row[2] for row in pairs]
-    reference = [row[3] for row in pairs]
-    relative = [row[4] for row in pairs]
-    fc_ref_errors = [_angle_error_degrees(a, b) for a, b in zip(fc, reference)]
+    fc_pitch = [row[1][0] for row in pairs]
+    fc_roll = [row[1][1] for row in pairs]
+    fc_yaw = [row[1][2] for row in pairs]
+    g_pitch = [row[2].attitude_deg[0] for row in pairs]
+    g_roll = [row[2].attitude_deg[1] for row in pairs]
+    g_yaw = [row[2].attitude_deg[2] for row in pairs]
+    joint_pitch = [
+        row[2].pitch_joint_deg if row[2].pitch_joint_deg is not None else 0.0
+        for row in pairs
+    ]
+    ext16 = [
+        (row[2].extension_16_raw or 0) / 10.0
+        for row in pairs
+    ]
+    relative_yaw = [row[2].relative_yaw_deg for row in pairs]
+    ref10 = [
+        row[2].yaw_reference_deg if row[2].yaw_reference_deg is not None else 0.0
+        for row in pairs
+    ]
 
-    fc_u = _unwrap_degrees(fc)
-    gimbal_u = _unwrap_degrees(gimbal)
-    reference_u = _unwrap_degrees(reference)
-    relative_u = _unwrap_degrees(relative)
+    desired_pitch = [g - f for f, g in zip(fc_pitch, g_pitch)]
+    desired_roll = [_angle_delta_degrees(g, f) for f, g in zip(fc_roll, g_roll)]
+    desired_yaw = [_angle_delta_degrees(g, f) for f, g in zip(fc_yaw, g_yaw)]
+
+    pitch_errors = [abs(a - b) for a, b in zip(joint_pitch, desired_pitch)]
+    roll_errors = [abs(a - b) for a, b in zip(ext16, desired_roll)]
+    yaw_errors = [
+        _angle_error_degrees(a, b) for a, b in zip(relative_yaw, desired_yaw)
+    ]
+
+    fc_yaw_u = _unwrap_degrees(fc_yaw)
+    g_yaw_u = _unwrap_degrees(g_yaw)
+    ref10_u = _unwrap_degrees(ref10)
 
     return {
         "pairs": len(pairs),
         "skew_median_ms": _median(skews_ms),
         "skew_max_ms": max(skews_ms),
-        "fc_range": _range(fc_u),
-        "gimbal_range": _range(gimbal_u),
-        "reference_range": _range(reference_u),
-        "relative_range": _range(relative_u),
-        "fc_reference_corr": _pearson(fc_u, reference_u),
-        "fc_gimbal_corr": _pearson(fc_u, gimbal_u),
-        "fc_relative_corr": _pearson(fc_u, relative_u),
-        "fc_reference_error_median": _median(fc_ref_errors),
-        "fc_reference_error_max": max(fc_ref_errors),
+        "fc_ranges": (_range(fc_pitch), _range(fc_roll), _range(fc_yaw_u)),
+        "gimbal_ranges": (_range(g_pitch), _range(g_roll), _range(g_yaw_u)),
+        "relative_ranges": (
+            _range(joint_pitch), _range(ext16), _range(relative_yaw)
+        ),
+        "pitch_joint_corr": _pearson(joint_pitch, desired_pitch),
+        "pitch_joint_error_median": _median(pitch_errors),
+        "pitch_joint_error_max": max(pitch_errors),
+        "ext16_roll_corr": _pearson(ext16, desired_roll),
+        "ext16_roll_error_median": _median(roll_errors),
+        "ext16_roll_error_max": max(roll_errors),
+        "relative_yaw_corr": _pearson(relative_yaw, desired_yaw),
+        "relative_yaw_error_median": _median(yaw_errors),
+        "relative_yaw_error_max": max(yaw_errors),
+        "ref10_fc_corr": _pearson(ref10_u, fc_yaw_u),
+        "ref10_gimbal_corr": _pearson(ref10_u, g_yaw_u),
+        "ref10_range": _range(ref10_u),
     }
 
 
@@ -942,33 +966,55 @@ def report(topology: Topology, *, commands_per_module: int = 8,
         )
 
     if verbose:
-        cross = _cross_yaw_diagnostics(topology)
+        cross = _cross_attitude_diagnostics(topology)
         if cross is not None:
             def corr(value):
                 return f"{value:+.3f}" if value is not None else "?"
+            fc_pitch, fc_roll, fc_yaw = cross["fc_ranges"]
+            g_pitch, g_roll, g_yaw = cross["gimbal_ranges"]
+            joint_pitch, ext16, relative_yaw = cross["relative_ranges"]
             lines.append(
-                "cross-yaw: "
+                "cross-attitude: "
                 f"pairs={cross['pairs']} "
                 f"skew={cross['skew_median_ms']:.1f}ms median/"
                 f"{cross['skew_max_ms']:.1f}ms max"
             )
             lines.append(
-                "    ranges: "
-                f"fc={cross['fc_range'][0]:.1f}..{cross['fc_range'][1]:.1f}deg  "
-                f"gimbal={cross['gimbal_range'][0]:.1f}..{cross['gimbal_range'][1]:.1f}deg  "
-                f"ref@10={cross['reference_range'][0]:.2f}..{cross['reference_range'][1]:.2f}deg  "
-                f"relative@08={cross['relative_range'][0]:.1f}..{cross['relative_range'][1]:.1f}deg"
+                "    fc: "
+                f"pitch={fc_pitch[0]:.1f}..{fc_pitch[1]:.1f} "
+                f"roll={fc_roll[0]:.1f}..{fc_roll[1]:.1f} "
+                f"yaw={fc_yaw[0]:.1f}..{fc_yaw[1]:.1f}deg"
             )
             lines.append(
-                "    corr(unwrapped): "
-                f"fc-ref={corr(cross['fc_reference_corr'])}  "
-                f"fc-gimbal={corr(cross['fc_gimbal_corr'])}  "
-                f"fc-relative={corr(cross['fc_relative_corr'])}"
+                "    gimbal: "
+                f"pitch={g_pitch[0]:.1f}..{g_pitch[1]:.1f} "
+                f"roll={g_roll[0]:.1f}..{g_roll[1]:.1f} "
+                f"yaw={g_yaw[0]:.1f}..{g_yaw[1]:.1f}deg"
             )
             lines.append(
-                "    fc-ref-error: "
-                f"median={cross['fc_reference_error_median']:.3f}deg "
-                f"max={cross['fc_reference_error_max']:.3f}deg"
+                "    relative-fields: "
+                f"joint@14={joint_pitch[0]:.1f}..{joint_pitch[1]:.1f} "
+                f"ext@16/10={ext16[0]:.1f}..{ext16[1]:.1f} "
+                f"yaw@08={relative_yaw[0]:.1f}..{relative_yaw[1]:.1f}deg"
+            )
+            lines.append(
+                "    body-relative-models: "
+                f"pitch corr={corr(cross['pitch_joint_corr'])} "
+                f"err={cross['pitch_joint_error_median']:.2f}/"
+                f"{cross['pitch_joint_error_max']:.2f}deg median/max; "
+                f"roll corr={corr(cross['ext16_roll_corr'])} "
+                f"err={cross['ext16_roll_error_median']:.2f}/"
+                f"{cross['ext16_roll_error_max']:.2f}deg; "
+                f"yaw corr={corr(cross['relative_yaw_corr'])} "
+                f"err={cross['relative_yaw_error_median']:.2f}/"
+                f"{cross['relative_yaw_error_max']:.2f}deg"
+            )
+            ref10 = cross["ref10_range"]
+            lines.append(
+                "    field@10 candidate: "
+                f"range={ref10[0]:.2f}..{ref10[1]:.2f}deg "
+                f"corr(fc-yaw)={corr(cross['ref10_fc_corr'])} "
+                f"corr(gimbal-yaw)={corr(cross['ref10_gimbal_corr'])}"
             )
     return "\n".join(lines)
 
