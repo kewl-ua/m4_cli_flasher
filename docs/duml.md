@@ -594,8 +594,31 @@ controlled experiments.
 ### Kinematic-fit excitation guard
 
 The cross-attitude kinematic fit is intentionally skipped when fewer than two
-FC attitude axes span at least 10 degrees during the retained window. A
+FC attitude axes span at least 20 degrees during the retained window. A
 stationary or single-axis capture cannot identify temporal lag, full
 three-axis rotation order or a fixed mounting transform uniquely; reporting a
 "best" model in that case is misleading. Those captures remain valid for
 single-field telemetry diagnostics such as FLYC tail analysis.
+
+
+### Current FLYC 03/43 tail evidence
+
+Controlled stationary and body-pitch captures provide two useful M4T-specific
+observations:
+
+- historical slot 0x28 is not behaving like legacy battery_remain. At ~2 Hz
+  packet rate its low byte advances almost always by +25 and occasionally +26,
+  corresponding to approximately 50 ticks/s (about a 20 ms tick). Treat it as
+  a 50 Hz counter/timebase candidate, not yet as a typed semantic field.
+- historical WM620 Unknown35 at 0x35..0x36 is nearly static (1..2) while
+  stationary and becomes a signed continuous value during body-pitch motion.
+  It did not meet the current correlation thresholds for pitch position or
+  pitch rate, so those hypotheses are not supported yet.
+- historical slot 0x33 behaves categorically (two values in the pitch capture),
+  while 0x35..0x36 behaves continuously; they should be investigated as
+  different classes of state.
+- no byte at 0x37..0x53 changed in the stationary or body-pitch captures.
+
+Verbose topology now reports counter-like frequency estimates, categorical
+state summaries, and angular-acceleration correlations to guide the next
+single-axis experiments.
