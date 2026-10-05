@@ -670,3 +670,22 @@ and reports the best linear model:
 
 together with lag in samples, Pearson correlation and RMSE. Counter-like
 offsets such as the ~50 Hz candidate at 0x28 are excluded from this fit.
+
+
+### Motion purity and unconditional Unknown35 fit
+
+Verbose FLYC tail diagnostics now report quaternion-derived RMS angular
+activity for body X/Y/Z and a simple dominant-axis purity ratio. This makes it
+explicit whether a capture is truly single-axis rather than relying on Euler
+angle spans.
+
+The historical Unknown35 word at 0x35..0x36 is also fitted against
+omega_x/omega_y/omega_z for every capture with enough variation, even when the
+best correlation is below the general 0.80 promotion/report threshold:
+
+    tail-motion: ...
+    tail-unknown35-fit: ...
+
+This preserves weak or noisy evidence during calibration runs instead of
+silently suppressing it. The ordinary tail-body-rate-fit output remains
+thresholded to avoid flooding the report with poor generic candidates.
