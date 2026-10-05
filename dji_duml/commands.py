@@ -37,6 +37,11 @@ GENERAL_NAMES = {
 }
 
 FLYC = 0x03
+GIMBAL = 0x04
+GIMBAL_NAMES = {
+    0x05: "Gimbal Params / Push Position",
+}
+
 #: Flight controller config table commands, as named by the public
 #: dji-firmware-tools dissector; only E0, E1 and E2 are reads.
 FLYC_NAMES = {
@@ -52,6 +57,8 @@ def command_name(cmd_set: int, cmd_id: int) -> str:
         return GENERAL_NAMES[cmd_id]
     if cmd_set == FLYC and cmd_id in FLYC_NAMES:
         return FLYC_NAMES[cmd_id]
+    if cmd_set == GIMBAL and cmd_id in GIMBAL_NAMES:
+        return GIMBAL_NAMES[cmd_id]
     return f"set {cmd_set:02x} id {cmd_id:02x}"
 
 
