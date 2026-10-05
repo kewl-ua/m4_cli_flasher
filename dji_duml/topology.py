@@ -593,42 +593,6 @@ def _gimbal_pitch_model(stream: TrafficStream) -> dict | None:
     }
 
 
-def _gimbal_yaw_model(stream: TrafficStream) -> dict | None:
-    """Test whether 0x10 is a yaw reference and legacy 0x08 is relative yaw."""
-    if stream.cmd_set != 0x04 or stream.cmd_id != 0x05:
-        return None
-
-    from .telemetry import parse_gimbal_params
-
-    references = []
-    relatives = []
-    errors = []
-    for _, payload in stream._samples:
-        if len(payload) < 20:
-            continue
-        try:
-            item = parse_gimbal_params(payload)
-        except UnexpectedReply:
-            continue
-        reference = int.from_bytes(payload[0x10:0x12], "little", signed=True) / 100.0
-        predicted = reference + item.relative_yaw_deg
-        error = _angle_error_degrees(predicted, item.attitude_deg[2])
-        references.append(reference)
-        relatives.append(item.relative_yaw_deg)
-        errors.append(error)
-
-    if not errors:
-        return None
-    ordered = sorted(errors)
-    median = ordered[len(ordered) // 2]
-    return {
-        "reference_range": _range(references),
-        "relative_range": _range(relatives),
-        "median_error": median,
-        "max_error": max(errors),
-    }
-
-
 def _gimbal_rate_correlations(stream: TrafficStream) -> dict[str, dict[str, float | None]]:
     """Correlate opaque int16 fields with Euler angular rates.
 
@@ -845,9 +809,8 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                         )
                         if gimbal.yaw_reference_deg is not None:
                             line += (
-                                f" yaw-ref={gimbal.yaw_reference_deg:.2f}deg"
+                                f" yaw-ref-candidate={gimbal.yaw_reference_deg:.2f}deg"
                                 f" rel-yaw={gimbal.relative_yaw_deg:.1f}deg"
-                                f" pred-yaw={gimbal.predicted_yaw_deg:.2f}deg"
                             )
                         if gimbal.pitch_joint_deg is not None:
                             line += f" joint-pitch={gimbal.pitch_joint_deg:.1f}deg"
@@ -929,16 +892,6 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                     f"joint@14={joint[0]:.1f}..{joint[1]:.1f}deg "
                                     f"corr={corr_text} median-error={pitch_model['median_error']:.3f}deg "
                                     f"max-error={pitch_model['max_error']:.3f}deg"
-                                )
-                            yaw_model = _gimbal_yaw_model(stream)
-                            if yaw_model is not None:
-                                ref = yaw_model["reference_range"]
-                                rel = yaw_model["relative_range"]
-                                lines.append(
-                                    f"       yaw-model: ref@10={ref[0]:.2f}..{ref[1]:.2f}deg "
-                                    f"relative@08={rel[0]:.1f}..{rel[1]:.1f}deg "
-                                    f"median-error={yaw_model['median_error']:.3f}deg "
-                                    f"max-error={yaw_model['max_error']:.3f}deg"
                                 )
                             rate_correlations = _gimbal_rate_correlations(stream)
                             if rate_correlations:
