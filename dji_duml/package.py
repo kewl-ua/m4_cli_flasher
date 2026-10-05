@@ -23,6 +23,10 @@ _MD5 = re.compile(r"[0-9a-fA-F]{32}")
 _SIZE = re.compile(r"[0-9]{1,12}")  # str.isdigit() also takes "²", which int() rejects
 #: Real M4T configurations are about 25 KiB.
 CONFIG_LIMIT = 1 << 20
+#: Every signed DJI image starts with this: configurations and modules alike.
+IMAGE_MAGIC = b"IM*H"
+#: <release> attributes worth showing; none of them is enforced here.
+RELEASE_FIELDS = ("from", "expire", "antirollback", "enforce")
 
 
 @dataclass(frozen=True)
@@ -166,6 +170,43 @@ def manifest_files(config_name: str, data: bytes
     if len(set(names)) != len(names):
         raise PackageError(f"The manifest in {config_name!r} lists a module file twice.")
     return version, modules
+
+
+@dataclass(frozen=True)
+class ConfigInfo:
+    """What a .cfg.sig states, read from its bytes alone (its name is not used)."""
+    product: str  # <device id>, e.g. wa345t
+    version: FirmwareVersion
+    modules: tuple[PackageFile, ...]
+    release: tuple[tuple[str, str], ...]  # RELEASE_FIELDS present, e.g. ("from", "2025/06/14")
+
+
+def read_config(data: bytes) -> ConfigInfo:
+    """Product, version and module files of a signed configuration, or a
+    PackageError when the bytes are not one."""
+    if not data.startswith(IMAGE_MAGIC):
+        raise PackageError("Not a signed DJI image: no IM*H header.")
+    if len(data) > CONFIG_LIMIT:
+        raise PackageError(f"{len(data)} bytes is too large for a configuration.")
+    start = data.find(b"<?xml")
+    end = data.find(b"</dji>", start)
+    if start < 0 or end < 0:
+        raise PackageError("No readable manifest in the configuration.")
+    try:
+        root = ElementTree.fromstring(data[start:end + len(b"</dji>")],
+                                      parser=ElementTree.XMLParser(encoding="utf-8"))
+    except (ElementTree.ParseError, ValueError, LookupError) as exc:
+        raise PackageError(f"Unreadable manifest: {exc}") from exc
+    products = {device.get("id", "").lower() for device in root.findall("device")}
+    if len(products) != 1:
+        raise PackageError(f"The manifest describes {len(products)} devices, not one.")
+    product = products.pop()
+    version, modules = manifest_files(f"{product}.cfg.sig", data)
+    if version is None or not modules:
+        raise PackageError("The manifest lists no version or no module files.")
+    release = root.find("device/firmware/release")
+    return ConfigInfo(product, version, tuple(modules), tuple(
+        (key, release.get(key)) for key in RELEASE_FIELDS if release.get(key) is not None))
 
 
 def _files(config: str, sizes: dict[str, int], modules: list[PackageFile]

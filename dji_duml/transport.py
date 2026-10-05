@@ -226,7 +226,10 @@ class UsbBulkTransport:
                     if _interface(device, profile) is None:
                         _dispose(device)
                         continue
+                    # Only pyusb devices have a kernel driver to detach; DJI's
+                    # libusb-win32 binding is Windows-only.
                     if (sys.platform.startswith("linux")
+                            and not isinstance(device, libusb_win32.Device)
                             and device.is_kernel_driver_active(profile.interface)):
                         device.detach_kernel_driver(profile.interface)
                     _claim(device, profile.interface)

@@ -206,6 +206,16 @@ class DjiDllTests(unittest.TestCase):
         link.close()
         self.assertEqual(sorted(set(dll.closed)), [0, 1, 2, 3, 4])
 
+    def test_the_dll_binding_has_no_kernel_driver_to_detach(self):
+        # The same tests run on Linux, where transport detaches kernel
+        # drivers from pyusb devices; DJI's binding has none.
+        dll = FakeDll(nodes=2, pipe_on=1)
+        with patch.object(transport, "_backends", return_value=iter([("libusb0", Library(dll))])), \
+                patch.object(transport.sys, "platform", "linux"):
+            link = transport.UsbBulkTransport.open(M4T)
+        self.assertIn((1, 4), dll.claimed)
+        link.close()
+
     def test_scan_lists_and_closes_every_node(self):
         dll = FakeDll(nodes=2)
         with patch.object(transport, "_backends", return_value=iter([("libusb0", Library(dll))])):

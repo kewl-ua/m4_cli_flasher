@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import subprocess
 import sys
 import time
 from collections import Counter
+from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 
-from . import commands, pcap
+from . import commands, installed, params, pcap
 from .client import DumlClient
 from .errors import (
     DumlError, FlashAborted, FlashFailed, FlashOutcomeUnknown, FlashRefused,
@@ -17,10 +21,12 @@ from .display import ProgressView
 from .extract import REPORT, extract
 from .flasher import PROCEDURES, UPGRADE_CENTER, Flasher, Stage, plan
 from .frame import format_address
+from .ingest import add, harvest
 from .journal import Journal
 from .pack import pack
 from .package import inspect_package
 from .profiles import PROFILES, get_profile
+from .store import Store, StoreError, assistant_cache, size_text
 from .version import FirmwareVersion
 
 EXIT_CODES = {FlashRefused: 2, FlashAborted: 3, FlashFailed: 4, FlashOutcomeUnknown: 5}
@@ -63,7 +69,8 @@ def _drone(args, profile, image_version: str | None = None):
         return None
     from .sim import SimulatedM4T
 
-    _say("SIMULATION: no USB device is used.")
+    # stderr, so that --json output stays one JSON document
+    print("SIMULATION: no USB device is used.", file=sys.stderr, flush=True)
     return SimulatedM4T(profile, args.simulate, image_version=image_version)
 
 
@@ -98,8 +105,107 @@ def cmd_version(args, profile) -> int:
     return 0
 
 
+def _capture_frames(path):
+    return (entry.frame for entry in pcap.iter_frames(path))
+
+
+def cmd_manifest(args, profile) -> int:
+    if args.output and Path(args.output).exists():  # before anything is read
+        raise FileExistsError(f"{args.output} already exists; manifest -o never overwrites.")
+    if args.capture:
+        data = installed.config_from_frames(_capture_frames(args.capture),
+                                            profile.upgrade_center)
+        if data is None:
+            print("No complete read of the installed configuration (00/4F type 01) in this "
+                  "capture.", file=sys.stderr)
+            return 2
+    else:
+        journal = Journal(args.journal)
+        with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+            data = installed.read_config(client, profile.upgrade_center)
+    if args.output:
+        # Saved before it is parsed: a layout the parser does not know is
+        # still worth keeping for the archive.
+        with open(args.output, "xb") as handle:
+            handle.write(data)
+    config = installed.describe(data, profile.product_code)
+    package = differences = None
+    if args.compare:
+        package = inspect_package(args.compare)
+        differences = installed.compare(config, package)
+    if args.json:
+        result = {"version": str(config.version) if config.version else None,
+                  "size": len(config.data), "md5": config.md5.hex(),
+                  "modules": [{"name": item.name, "size": item.size, "md5": item.md5.hex()}
+                              for item in config.modules]}
+        if package is not None:
+            result["compare"] = {"package": str(package.path), "version": str(package.version),
+                                 "matches": not differences, "differences": differences}
+        _say(json.dumps(result))
+        return 2 if differences else 0
+    _say(f"version   {config.version or 'unknown: no readable manifest'}")
+    _say(f"config    {len(config.data)} bytes, md5 {config.md5.hex()}"
+         + (f", saved to {args.output}" if args.output else ""))
+    _say(f"modules   {len(config.modules)}")
+    for item in config.modules:
+        _say(_ascii(f"  {item.size:>11} {item.md5.hex()} {item.name}"))
+    if package is None:
+        return 0
+    if differences:
+        _say(_ascii(f"The drone does NOT run {package.path.name} ({package.version}):"))
+        for line in differences:
+            _say(_ascii(f"  {line}"))
+        return 2
+    _say(_ascii(f"The drone runs exactly {package.path.name} ({package.version})."))
+    return 0
+
+
+def cmd_params(args, profile) -> int:
+    if args.capture:
+        items = params.from_frames(_capture_frames(args.capture))
+        if not items:
+            print("No flight controller parameters (03/E1) in this capture.", file=sys.stderr)
+            return 2
+    else:
+        def progress(done, count):
+            if done % 250 == 0 or done == count:
+                print(f"read {done} of {count} indexes", file=sys.stderr, flush=True)
+
+        journal = Journal(args.journal)
+        with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+            info, items = params.read(client, on_progress=progress)
+        print(f"table {info.table}: {info.count} indexes, {len(items)} parameters, "
+              f"crc {info.crc:08x}", file=sys.stderr)
+        if not items:
+            print("The flight controller listed no parameters.", file=sys.stderr)
+            return 2
+    shown = [item for item in items
+             if (not args.changed or item.changed)
+             and (not args.name or args.name.lower() in item.name.lower())]
+    if args.json:
+        def finite(number):  # JSON has no NaN or infinity
+            return None if isinstance(number, float) and not math.isfinite(number) else number
+
+        _say(json.dumps([{"index": item.index, "name": item.name, "type": item.type_name,
+                          "value": finite(item.value) if item.value is not None else
+                          (item.raw.hex() if item.raw is not None else None),
+                          "default": finite(item.default), "min": finite(item.minimum),
+                          "max": finite(item.maximum), "changed": item.changed}
+                         for item in shown], allow_nan=False))
+        return 0
+    def plain(number):
+        return f"{number:g}" if isinstance(number, float) else str(number)
+
+    for item in shown:
+        _say(_ascii(f"{item.index:5} {item.type_name:4} {item.shown():>14}"
+                    f"{'*' if item.changed else ' '} default {plain(item.default):<10} "
+                    f"[{plain(item.minimum)}..{plain(item.maximum)}]  {item.name}"))
+    _say(f"{len(shown)} of {len(items)} parameters shown; * = differs from the default")
+    return 0
+
+
 def _show_package(package) -> None:
-    _say(f"file      {package.path}")
+    _say(_ascii(f"file      {package.path}"))
     _say(f"kind      {package.kind}, {package.members} members, {package.size} bytes")
     _say(f"product   {package.product_code}")
     _say(f"version   {package.version or 'unknown: no readable manifest in the configuration'}")
@@ -177,8 +283,10 @@ def cmd_decode(args, profile) -> int:
 
 
 def _ascii(text: str) -> str:
-    """Text from a capture or manifest, printable on any console."""
-    return text.encode("ascii", "backslashreplace").decode("ascii")
+    """Text from a capture, a manifest or the drone, printable on any console
+    and unable to steer it: non-ASCII and control characters are escaped."""
+    text = text.encode("ascii", "backslashreplace").decode("ascii")
+    return "".join(char if " " <= char < "\x7f" else f"\\x{ord(char):02x}" for char in text)
 
 
 def cmd_extract(args, profile) -> int:
@@ -237,8 +345,55 @@ def cmd_flash(args, profile) -> int:
         raise FlashRefused("Firmware write requires --yes. No device action was performed.")
     target = FirmwareVersion.parse(args.target)
     expected = FirmwareVersion.parse(args.expected_current)
+    if args.from_store:
+        with _store_package(args, profile, target) as (package, event):
+            return _flash(args, profile, package, target, expected, event)
     package = inspect_package(args.package)
     _show_package(package)
+    return _flash(args, profile, package, target, expected)
+
+
+@contextmanager
+def _store_package(args, profile, target):
+    """The version from the store as a temporary package for the unchanged
+    flasher: the same tar ``fw export`` writes. It is deleted however the
+    flash ends; every store problem is a refusal before anything is sent."""
+    product = profile.product_code
+    try:
+        store = Store.open(args.store)
+        config, notes = store.select(product, target, args.config)
+    except (StoreError, OSError, ValueError) as exc:  # ValueError: a hand-edited index
+        raise FlashRefused(f"{exc} Nothing was sent.") from exc
+    path = store.tmp / f"flash-{os.getpid()}-{product}-{target}-{config.sha[:8]}.bin"
+    _say(_ascii(f"store     {store.root}: {product} {target}, config {config.sha[:12]}, "
+                f"{config.held}/{len(config.entries)} modules"))
+    try:
+        try:
+            store.tmp.mkdir(exist_ok=True)
+            path.unlink(missing_ok=True)  # left by an earlier process with this pid
+            package = store.export(config, path, temporary=True)
+        except (DumlError, OSError) as exc:
+            raise FlashRefused(f"The package could not be built from the store: {exc} "
+                               "Nothing was sent.") from exc
+        _say("build     written and read back; every file matches its manifest")
+        for note in notes:
+            _say(f"note: {note}")
+        _show_package(package)
+        yield package, {"store": str(store.root), "product": product, "version": str(target),
+                        "config_sha256": config.sha, "package_sha256": package.sha256,
+                        "package_md5": package.md5.hex()}
+    finally:
+        # Never raises: a file held by a virus scanner must not replace the
+        # flash's own result (or exception) with a cleanup error.
+        for leftover in (path, path.with_name(path.name + ".part")):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError as exc:
+                _say(_ascii(f"note: could not delete {leftover} ({exc}); dji-duml fw check "
+                            "--fix deletes it after 24 h"))
+
+
+def _flash(args, profile, package, target, expected, store_event=None) -> int:
     journal_path = args.journal or Path("dji-duml-journal") / (
         time.strftime("%Y%m%d-%H%M%S") + f"-{profile.key}.jsonl")
     drone = _drone(args, profile, image_version=args.target)
@@ -246,7 +401,9 @@ def cmd_flash(args, profile) -> int:
     center = (args.procedure or profile.default_procedure) == UPGRADE_CENTER
     total = package.files_size if center and package.files else package.size
     with Journal(journal_path) as journal, ProgressView(total, verbose=args.verbose) as view:
-        _say(f"journal   {journal_path}")
+        _say(_ascii(f"journal   {journal_path}"))
+        if store_event is not None:
+            journal.event("store-package", **store_event)
         flasher = Flasher(
             _opener(args, profile, journal, drone), profile, journal=journal,
             on_progress=view, **({"upload": drone.upload, "reconnect_interval": 0.05,
@@ -284,6 +441,302 @@ def cmd_flash(args, profile) -> int:
     return 0
 
 
+FLASH_NEXT = ("dji-duml flash --from-store --target {} --expected-current <version on the drone> "
+              "--yes")
+CHOOSE_NEXT = "dji-duml fw show {}   ({} complete configurations: choose one with --config)"
+
+
+def _complete(store: Store, product: str, version: FirmwareVersion) -> list:
+    found = next((item for item in store.versions(product) if item.version == version), None)
+    return found.complete if found else []
+
+
+def _target(store: Store, product: str, version: FirmwareVersion, chosen=None) -> str:
+    """``V`` for FLASH_NEXT, with ``--config`` when V has more than one
+    complete configuration: ``chosen``'s, else a placeholder naming them."""
+    complete = _complete(store, product, version)
+    if len(complete) <= 1:
+        return str(version)
+    if chosen is not None:
+        return f"{version} --config {chosen.sha[:8]}"
+    return f"{version} --config <{' or '.join(config.sha[:8] for config in complete)}>"
+
+
+def _store(args, create: bool = False) -> Store:
+    store = Store.open(args.store, create=create)
+    _say(_ascii(f"store     {store.root}" + (" (created)" if store.created else "")))
+    return store
+
+
+def _next(store: Store, ready: str | None, otherwise: str, harvested: bool = False) -> None:
+    """The one thing to do next: repair, harvest, flash, or ``otherwise``."""
+    cache = store.unseen_cache(assistant_cache())
+    model = store.model()
+    if model.absent or model.unreadable or store.lost_index:
+        _say("STORE DAMAGED: dji-duml fw check")
+    elif cache and cache[1] and not harvested:
+        _say(f"next      dji-duml fw harvest   (firm_cache: {cache[1]} files not in the store)")
+    elif ready:
+        _say(f"next      {FLASH_NEXT.format(ready)}")
+    else:
+        _say(f"next      {otherwise}")
+
+
+def _spaced(number: int) -> str:
+    return f"{number:,}".replace(",", " ")
+
+
+def _note(text: str) -> str:
+    """A release note from DJI, printable on any console."""
+    return _ascii(text.replace("•", "*").replace("\t", " "))
+
+
+def _origin(store: Store, config) -> str:
+    """Where a version came from: its configuration's sources, and ``cache``
+    when Assistant's cache holds all of its modules too. Modules shared with
+    other versions would name every source, so they are not listed."""
+    kinds = store.kinds([config.sha])
+    if all(any(source["from"] == "cache" for source in store.index["objects"][digest]["sources"])
+           for entry in config.entries for digest in entry.objects) and "cache" not in kinds:
+        kinds += ", cache"
+    return kinds
+
+
+def _row(store: Store, version) -> str:
+    release = version.release.date if version.release else ""
+    best = version.best
+    if best is None:
+        return f"  {str(version.version):10}  {release:10}  not held{'':22}DJI release list only"
+    row = (f"  {str(version.version):10}  {release:10}  {version.state:8}  "
+           f"{best.held:>2}/{len(best.entries):<4}  {size_text(best.files_size):>9}  ")
+    lost = [entry for entry in best.entries if entry.state != "ok"]
+    if not lost:
+        return row + _origin(store, best)
+    first = lost[0].file
+    return row + (f"missing {len(lost)} ({first.name}, {size_text(first.size)}"
+                  + (", ..." if len(lost) > 1 else "") + f"): fw show {version.version}")
+
+
+def _damage(store: Store) -> None:
+    """What would otherwise vanish from the views: a lost index, and
+    configuration objects that no longer read as one."""
+    if store.lost_index:
+        _say(_ascii(f"DAMAGED   {store.lost_text()}"))
+    for digest, error in sorted(store.model().unreadable.items()):
+        _say(_ascii(f"DAMAGED   unreadable config {digest[:12]}: {error}"))
+
+
+def cmd_fw_list(args, profile) -> int:
+    store = Store.open(args.store)
+    model = store.model()
+    _say(_ascii(f"store     {store.root}  ({len(model.present)} objects, "
+                f"{size_text(sum(record['size'] for record in model.present.values()))})"))
+    _damage(store)
+    products = store.products()
+    shown = [profile.product_code] + ([product for product in products
+                                       if product != profile.product_code] if args.all else [])
+    ready = None
+    for product in shown:
+        title = f"{profile.name} (profile {profile.key})" if product == profile.product_code \
+            else "another product"
+        _say(f"{product:9} {title}")
+        versions = store.versions(product)
+        if not versions:
+            _say("  nothing held")
+            continue
+        _say("  version     released    state     modules  size       from")
+        for version in versions:
+            _say(_ascii(_row(store, version)))
+            if product == profile.product_code and ready is None \
+                    and version.state.startswith("ready"):
+                ready = "<version>"
+    others = [product for product in products if product not in shown]
+    if others:
+        _say(f"others    {', '.join(others)}: fw list --all")
+    if args.all:
+        for digest, entries in store.unassigned():
+            listed = sorted(entry["version"] for entry in entries)
+            _say(f"release list {digest[:8]}: {len(entries)} versions {listed[0]}..{listed[-1]}, "
+                 "no held configuration matches")
+    orphans = store.orphans()
+    if orphans:
+        _say(f"orphans   {len(orphans)} modules, "
+             f"{size_text(sum(record['size'] for _, record in orphans))}, listed by no held "
+             "configuration (fw orphans)")
+    cache = store.unseen_cache(assistant_cache())
+    if cache is not None:
+        _say(f"assistant firm_cache: {cache[0]} files, "
+             + (f"{cache[1]} not in the store" if cache[1] else "all in the store"))
+    _next(store, ready, "dji-duml fw add <package, capture or folder>")
+    return 0
+
+
+def _release_text(release: dict[str, str]) -> str:
+    parts = []
+    for key, value in release.items():
+        if key == "expire" and value.replace("/", "-") < date.today().isoformat():
+            value += " (past; not enforced by the device)"
+        parts.append(f"{key} {value}")
+    return ", ".join(parts)
+
+
+def cmd_fw_show(args, profile) -> int:
+    store = _store(args)
+    _damage(store)
+    target = FirmwareVersion.parse(args.version)
+    product = profile.product_code
+    versions = store.versions(product)
+    found = next((version for version in versions if version.version == target), None)
+    if found is None:
+        held = [str(version.version) for version in versions if version.configs]
+        raise StoreError(f"{product} {target} is not held and no DJI list knows it. "
+                         f"Held: {', '.join(held) or 'nothing'}.")
+    release = found.release
+    _say(f"version   {product} {target}" + (
+        f", released {release.date}" + (f" ({release.flow})" if release.flow else "")
+        if release else ""))
+    configs = list(found.configs)
+    if args.config is not None:
+        configs = [config for config in configs if config.sha.startswith(args.config.lower())]
+        if len(args.config) < 8 or len(configs) != 1:
+            raise StoreError(f"--config {args.config} matches {len(configs)} configurations of "
+                             f"{product} {target}; give at least 8 hex digits of one.")
+    if not configs:
+        _say("state     not held: known only from a DJI release list")
+    for config in configs:
+        _say(f"state     {'ready' if config.complete else config.state}: configuration and "
+             f"{config.held} of {len(config.entries)} modules, {_spaced(config.files_size)} bytes")
+        sources = store.index["objects"][config.sha]["sources"]
+        _say(_ascii(f"config    {config.sha[:12]}  {_spaced(config.size)} bytes, seen as "
+                    + ", ".join(sorted({source["name"] for source in sources}))
+                    + f" ({store.kinds([config.sha])})"))
+        _say(f"release   {_release_text(dict(config.info.release)) or 'no <release> fields'}")
+        _say("modules   state     file" + " " * 59 + "size  md5       seen in")
+        for entry in config.entries:
+            item = entry.file
+            _say(_ascii(f"          {entry.state:8}  {item.name:<56} {item.size:>10}  "
+                        f"{item.md5.hex()[:8]}  {store.kinds(entry.objects)}"))
+            if entry.state == "ok":
+                continue
+            _say(f"{'':20}md5 {item.md5.hex()}")
+            if entry.state == "conflict":
+                _say(f"{'':20}{len(entry.objects)} objects: "
+                     + ", ".join(digest[:12] for digest in entry.objects)
+                     + "; see dji-duml fw check")
+            else:
+                lost = [record for record in store.model().absent.values()
+                        if (record["md5"], record["size"]) == (item.md5.hex(), item.size)]
+                _say(_ascii(f"{'':20}" + (f"damaged: {store.hint(lost[0])}" if lost else
+                                          "not in the store: add a package, capture or cache "
+                                          "that holds it")))
+    if release and release.note:
+        for number, line in enumerate(release.note.strip().splitlines()):
+            _say(_note(f"{'note' if number == 0 else '':9} {line}"))
+    complete = [config for config in configs if config.complete]
+    if complete:
+        _next(store, _target(store, product, target, complete[0] if len(complete) == 1 else None),
+              "")
+    return 0 if complete else 1
+
+
+def cmd_fw_add(args, profile) -> int:
+    store = _store(args, create=True)
+    return _added(store, add(store, args.paths, args.force), profile)
+
+
+def cmd_fw_harvest(args, profile) -> int:
+    store = _store(args, create=True)
+    return _added(store, harvest(store, args.directory), profile, harvested=True)
+
+
+def _added(store: Store, report, profile, harvested: bool = False) -> int:
+    for line in report.lines:
+        _say(_ascii(line))
+    ready = []
+    for number, (product, version, before, after) in enumerate(report.changes):
+        name = version if product == profile.product_code else f"{product} {version}"
+        _say(f"{'versions' if number == 0 else '':9} {name}  {before} -> {after}")
+        if product == profile.product_code and after.startswith("ready") \
+                and not before.startswith("ready"):
+            ready.append(FirmwareVersion.parse(version))
+    before, after = report.orphans
+    if before != after:
+        _say(f"orphans   {before} -> {after}" + (
+            " modules, kept until a configuration that lists them arrives" if after > before
+            else ""))
+    otherwise = "dji-duml fw list"
+    if ready:
+        complete = len(_complete(store, profile.product_code, max(ready)))
+        if complete > 1:  # flash --from-store would refuse it without --config
+            otherwise, ready = CHOOSE_NEXT.format(max(ready), complete), []
+    _next(store, str(max(ready)) if ready else None, otherwise, harvested)
+    return report.code
+
+
+def cmd_fw_export(args, profile) -> int:
+    store = Store.open(args.store)
+    product = profile.product_code
+    config, notes = store.select(product, args.version, args.config)
+    _say(_ascii(f"store     {store.root}: {product} {config.info.version}, "
+                f"config {config.sha[:12]}"))
+    package = store.export(config, Path(args.output))
+    _show_package(package)
+    _say(f"files     {len(package.files)}, {package.files_size} bytes, "
+         "each module as its signed manifest states")
+    for note in notes:
+        _say(f"note: {note}")
+    _say(f"next      {FLASH_NEXT.format(_target(store, product, config.info.version, config))}")
+    return 0
+
+
+def cmd_fw_orphans(args, profile) -> int:
+    store = _store(args)
+    orphans = store.orphans()
+    _say(f"orphans   {len(orphans)} modules, "
+         f"{size_text(sum(record['size'] for _, record in orphans))}, listed by no held "
+         "configuration")
+    if orphans:
+        _say("  size         sha256        first seen        source")
+        for digest, record in orphans:
+            first = min(record["sources"], key=lambda source: source["added"])
+            seen = first["added"][:16].replace("T", " ")
+            _say(_ascii(f"  {record['size']:<11}  {digest[:12]}  {seen}  "
+                        f"{first['from']} {first['name']}"))
+        _say("note      They become usable when a configuration that lists them is added "
+             "(a capture of the flash, an offline ZIP).")
+    return 0
+
+
+def cmd_fw_check(args, profile) -> int:
+    store = _store(args)
+    rehashed = []
+    if args.fix:
+        with store.writer(repair=True):
+            problems = store.check(args.full, fix=True, on_bytes=rehashed.append)
+    else:
+        problems = store.check(args.full, on_bytes=rehashed.append)
+    for problem in problems:
+        _say(_ascii(f"{'fixed' if problem.fixed else 'PROBLEM':9} {problem.text}"))
+        if problem.hint and not problem.fixed:
+            _say(_ascii(f"{'':9} {problem.hint}"))
+    remaining = [problem for problem in problems if not problem.fixed]
+    model = store.model()
+    _say(f"checked   {len(store.index['objects'])} objects"
+         + (f" ({size_text(sum(rehashed))} rehashed)" if args.full else "")
+         + f", {len(model.configs)} configurations, {len(store.index['releases'])} release "
+         f"lists: " + (f"{len(remaining)} problem(s) remain" if remaining else "no problems"))
+    return 2 if remaining else 0
+
+
+FW_HANDLERS = {"list": cmd_fw_list, "show": cmd_fw_show, "add": cmd_fw_add,
+               "harvest": cmd_fw_harvest, "export": cmd_fw_export, "orphans": cmd_fw_orphans,
+               "check": cmd_fw_check}
+
+
+def cmd_fw(args, profile) -> int:
+    return FW_HANDLERS[args.fw_command or "list"](args, profile)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dji-duml", description="Direct DUML over USB, without DJI Assistant.")
@@ -296,6 +749,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--journal", type=Path, help="JSONL log of every frame and decision")
     parser.add_argument("--simulate", metavar="VERSION",
                         help="use an in-memory drone running VERSION instead of USB")
+    parser.add_argument("--store", type=Path, metavar="DIR",
+                        help="firmware store for fw and flash --from-store (default "
+                             "%%DJI_DUML_STORE%%, else %%LOCALAPPDATA%%\\dji-duml\\store on "
+                             "Windows and ~/.dji-duml/store elsewhere; under sudo pass it)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("scan", help="list matching USB devices (descriptor requests only)")
@@ -320,6 +777,21 @@ def build_parser() -> argparse.ArgumentParser:
     decode.add_argument("--full", action="store_true", help="do not truncate payloads")
     decode.add_argument("--json", action="store_true", help="one JSON object per frame")
 
+    manifest = sub.add_parser(
+        "manifest", help="read the signed manifest of the firmware installed on the drone")
+    manifest.add_argument("--capture", help="take it from a capture instead of the drone")
+    manifest.add_argument("-o", "--output", help="save the .cfg.sig there (a new file)")
+    manifest.add_argument("--compare", metavar="PACKAGE",
+                          help="exit 0 if the drone runs exactly this package, else 2")
+    manifest.add_argument("--json", action="store_true", help="one JSON object")
+
+    reader = sub.add_parser(
+        "params", help="read the flight controller's parameters (config table 0); reads only")
+    reader.add_argument("--capture", help="take them from a capture instead of the drone")
+    reader.add_argument("--changed", action="store_true", help="only values off their default")
+    reader.add_argument("--name", help="only names containing this text")
+    reader.add_argument("--json", action="store_true", help="one JSON list")
+
     extractor = sub.add_parser(
         "extract", help="recover the files a capture shows being sent to the upgrade center")
     extractor.add_argument("capture", help="pcap or pcapng, USBPcap or usbmon")
@@ -333,8 +805,41 @@ def build_parser() -> argparse.ArgumentParser:
     packer.add_argument("-o", "--output", required=True,
                         help="package file to write, e.g. 17.01.0516_dji_system.bin")
 
+    fw = sub.add_parser("fw", help="the local firmware store, used by version; no USB "
+                                   "(bare fw = fw list)")
+    fw.add_argument("--all", action="store_true", help=argparse.SUPPRESS)
+    fw_sub = fw.add_subparsers(dest="fw_command")
+    lister = fw_sub.add_parser("list", help="versions held, missing and known from DJI's lists")
+    lister.add_argument("--all", action="store_true", default=argparse.SUPPRESS,
+                        help="also other products and release lists of no held product")
+    shower = fw_sub.add_parser("show", help="one version: configuration, modules, release note")
+    shower.add_argument("version")
+    shower.add_argument("--config", metavar="HEX", help="SHA-256 prefix of one configuration")
+    adder = fw_sub.add_parser(
+        "add", help="store packages, captures, extract output, folders or cache files")
+    adder.add_argument("paths", nargs="+", metavar="PATH")
+    adder.add_argument("--force", action="store_true", help="read sources again even if unchanged")
+    harvester = fw_sub.add_parser("harvest",
+                                  help="store what DJI Assistant downloaded (firm_cache)")
+    harvester.add_argument("directory", nargs="?", metavar="DIR",
+                           help="default %%DJI_DUML_ASSISTANT_CACHE%%, else Assistant's "
+                                "firm_cache (Windows only)")
+    exporter = fw_sub.add_parser("export", help="write a version as a package for flash")
+    exporter.add_argument("version")
+    exporter.add_argument("-o", "--output", required=True, help="new file outside the store")
+    exporter.add_argument("--config", metavar="HEX", help="SHA-256 prefix of one configuration")
+    fw_sub.add_parser("orphans", help="modules no held configuration lists")
+    checker = fw_sub.add_parser("check", help="verify the store")
+    checker.add_argument("--full", action="store_true", help="rehash every object")
+    checker.add_argument("--fix", action="store_true",
+                         help="quarantine damaged objects, adopt strays, sweep tmp")
+
     flash = sub.add_parser("flash", help="write firmware (device must be prepared)")
-    flash.add_argument("package", help="offline ZIP, dji_system.bin or a pack output")
+    flash.add_argument("package", nargs="?", help="offline ZIP, dji_system.bin or a pack output")
+    flash.add_argument("--from-store", action="store_true",
+                       help="build the package for --target from the firmware store")
+    flash.add_argument("--config", metavar="HEX",
+                       help="with --from-store: SHA-256 prefix of the configuration to use")
     flash.add_argument("--target", required=True,
                        help="version the package installs; checked against its manifest")
     flash.add_argument("--expected-current", required=True,
@@ -353,12 +858,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 HANDLERS = {"scan": cmd_scan, "version": cmd_version, "inspect": cmd_inspect,
-            "plan": cmd_plan, "decode": cmd_decode, "extract": cmd_extract,
-            "pack": cmd_pack, "flash": cmd_flash}
+            "plan": cmd_plan, "decode": cmd_decode, "manifest": cmd_manifest,
+            "params": cmd_params, "extract": cmd_extract, "pack": cmd_pack,
+            "fw": cmd_fw, "flash": cmd_flash}
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "flash":
+        if (args.package is None) != args.from_store:
+            parser.error("flash takes either a PACKAGE or --from-store")
+        if args.config is not None and not args.from_store:
+            parser.error("--config needs --from-store")
     try:
         return HANDLERS[args.command](args, get_profile(args.profile))
     except DumlError as exc:

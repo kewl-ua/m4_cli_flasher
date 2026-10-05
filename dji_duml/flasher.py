@@ -196,6 +196,17 @@ def ftp_upload(host: str, source: Path, on_bytes: Callable[[int], None]) -> byte
     return digest.digest()
 
 
+def _open_lock_file(path: Path):
+    """The lock file for flock, also when another user made it: Linux's
+    fs.protected_regular refuses even root an O_CREAT open of another user's
+    file in /tmp, and a file made 0644 by root cannot be opened for writing by
+    a user. flock needs neither, so an existing file is opened read-only."""
+    try:
+        return os.fdopen(os.open(path, os.O_RDWR | os.O_CREAT, 0o666), "r+b")
+    except PermissionError:
+        return os.fdopen(os.open(path, os.O_RDONLY), "rb")
+
+
 class DeviceLock:
     """Cross-process lock so two flashers never drive the same model at once."""
 
@@ -205,13 +216,14 @@ class DeviceLock:
 
     def __enter__(self):
         try:
-            self._handle = open(self.path, "a+b")
             if os.name == "nt":
                 import msvcrt
+                self._handle = open(self.path, "a+b")
                 self._handle.seek(0)
                 msvcrt.locking(self._handle.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
+                self._handle = _open_lock_file(self.path)
                 fcntl.flock(self._handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             if self._handle is not None:

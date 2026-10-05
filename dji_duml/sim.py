@@ -8,6 +8,7 @@ real device behaves this way in every case.
 from __future__ import annotations
 
 import hashlib
+import struct
 import time
 from collections import Counter
 from pathlib import Path
@@ -190,6 +191,27 @@ class SimulatedDrone:
         self.upgrade_mode = False
 
 
+FLIGHT_CONTROLLER = 0x03
+
+#: A small config table 0 in the M4T's layout: (index, type id, default,
+#: minimum, maximum, name, value bytes).
+SIM_PARAMS = [
+    (1, 0, 0, 0, 18, "sweep_test_flag", b"\x00"),
+    (2, 8, 180.0, 0.0, 1000.0, "sweep_total_t_A__PRBS_period", struct.pack("<f", 180.0)),
+    (4, 5, 100, 20, 150, "basic_gain_roll_usr", struct.pack("<h", 120)),
+    (5, 2, 0, 0, 0xFFFFFFFF, "set_motor_auto_start_1", struct.pack("<I", 0)),
+]
+
+
+def _config_for(version: FirmwareVersion, product: str = "wa345t") -> bytes:
+    """A configuration as DJI lays it out (IM*H header, readable manifest),
+    listing no modules."""
+    xml = (f'<?xml version="1.0" encoding="utf-8"?>\n<dji><device id="{product}">'
+           f'<firmware formal="{version}"><release version="{version}"></release>'
+           '</firmware></device></dji>\n')
+    return b"IM*H" + bytes(604) + xml.encode()
+
+
 def _center_version(version: FirmwareVersion) -> bytes:
     """Version bytes of the 00/4F reply: one decimal field per byte, low first."""
     return bytes([version.build % 100, version.build // 100, version.minor, version.major])
@@ -226,9 +248,15 @@ class SimulatedM4T(SimulatedDrone):
                  reboots: int = 1, zero_version_reads: int = 2, progress_every: int = 1250,
                  end_status: dict[str, int] | None = None, stop_after_files: int | None = None,
                  mute_progress: bool = False, lose=(), repeat_reports: int = 1,
-                 tick: float | None = None, **options):
+                 tick: float | None = None, installed_config: bytes | None = None,
+                 params: list[tuple] | None = None, **options):
         super().__init__(profile, firmware, **options)
         self.center = profile.upgrade_center
+        #: What 00/4F type 01 returns; by default a manifest of ``firmware``.
+        self.installed_config = installed_config
+        #: Flight controller config table 0: (index, type id, default, minimum,
+        #: maximum, name, value bytes); indexes in between have no item.
+        self.params = SIM_PARAMS if params is None else params
         self.reboots = reboots
         self.zero_version_reads = zero_version_reads
         self.progress_every = progress_every
@@ -340,7 +368,38 @@ class SimulatedM4T(SimulatedDrone):
             body = bytes(2) + self.hardware.encode().ljust(16, b"\0")[:16] + bytes(14)
             self._answer(link, frame, body)
             return
+        if frame.receiver == FLIGHT_CONTROLLER and frame.cmd_set == commands.FLYC \
+                and not frame.response:
+            self.received.append(frame)
+            self._flight_controller(link, frame)
+            return
         super().handle(link, frame)
+
+    def _flight_controller(self, link: _Link, frame: Frame) -> None:
+        """Config table 0 reads as idle.pcap shows them; anything else gets
+        status 9, as the M4T gave for table 1."""
+        payload, items = frame.payload, {item[0]: item for item in self.params}
+        count = max(items, default=-1) + 2  # one empty index after the last item
+        if frame.cmd_id == 0xE0 and payload == b"\x00\x00":
+            self._answer(link, frame, struct.pack("<HHII", 0, 0, 0xDDB5B586, count))
+        elif frame.cmd_id == 0xE1 and len(payload) == 4 and payload[:2] == b"\x00\x00":
+            item = items.get(struct.unpack_from("<H", payload, 2)[0])
+            if item is None:
+                self._answer(link, frame, b"\x0e\x00")
+                return
+            index, type_id, default, minimum, maximum, name, value = item
+            limit = "<f" if type_id in (8, 9) else ("<i" if type_id in (4, 5, 6, 7) else "<I")
+            self._answer(link, frame, struct.pack("<HHHHH", 0, 0, index, type_id, len(value))
+                         + b"".join(struct.pack(limit, number)
+                                    for number in (default, minimum, maximum))
+                         + name.encode() + b"\0")
+        elif frame.cmd_id == 0xE2 and len(payload) == 6 and payload[:4] == b"\x00\x00\x01\x00":
+            index = struct.unpack_from("<H", payload, 4)[0]
+            item = items.get(index)
+            self._answer(link, frame, b"\x0e\x00" if item is None
+                         else struct.pack("<HHH", 0, 0, index) + item[6])
+        else:
+            self._answer(link, frame, b"\x09\x00")
 
     def _center_command(self, link: _Link, frame: Frame) -> None:
         cmd, payload = frame.cmd_id, frame.payload
@@ -360,6 +419,14 @@ class SimulatedM4T(SimulatedDrone):
         elif cmd == commands.UPGRADE_INSTALL:
             self._answer(link, frame, b"\x06")
             self._install(link)
+        elif cmd == commands.UPGRADE_RESULT and payload[:1] == b"\x01":
+            # The installed configuration, 256 bytes per request as the M4T sends it.
+            config = self.installed_config or _config_for(self.firmware)
+            offset = int.from_bytes(payload[1:5], "little")
+            chunk = config[offset:offset + 256]
+            left = max(0, len(config) - offset - len(chunk))
+            self._answer(link, frame, b"\x00" + len(chunk).to_bytes(4, "little")
+                         + left.to_bytes(4, "little") + chunk)
         elif cmd == commands.UPGRADE_RESULT:
             self._answer(link, frame, b"\x00\x04" + bytes(7) + _center_version(self.firmware))
         elif cmd == commands.PUSH_CONTROL:

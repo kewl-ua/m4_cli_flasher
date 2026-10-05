@@ -106,14 +106,27 @@ def pack(directory: str | Path, output: str | Path) -> Packed:
     members = [config, *(module.name for module in modules)]
     used = {os.path.normcase(name) for name in [*members, REPORT]}  # Windows ignores case
     ignored = tuple(name for name in names if os.path.normcase(name) not in used)
+    package = write_package(out, [(name, source / name) for name in members], version, data)
+    return Packed(package, ignored, tuple(notes))
+
+
+def write_package(output: str | Path, members: list[tuple[str, Path]], version,
+                  config_data: bytes) -> PackageInfo:
+    """Write ``members`` (name in the package, file to read), configuration
+    first, as an uncompressed tar at ``output``, a path that must not exist
+    yet, and read it back the way flash will. Any failure leaves nothing at
+    ``output``."""
+    out = Path(output)
+    if out.exists():
+        raise PackError(f"{out} already exists.")
     part = out.with_name(out.name + ".part")
     try:
         # Fixed metadata: the same files always give the same package.
         with tarfile.open(part, "w", format=tarfile.GNU_FORMAT) as archive:
-            for name in members:
+            for name, path in members:
                 info = tarfile.TarInfo(name)
-                info.size, info.mode, info.mtime = (source / name).stat().st_size, 0o644, 0
-                with open(source / name, "rb") as handle:
+                info.size, info.mode, info.mtime = path.stat().st_size, 0o644, 0
+                with open(path, "rb") as handle:
                     archive.addfile(info, handle)
         with open(part, "rb+") as handle:
             os.fsync(handle.fileno())
@@ -122,11 +135,10 @@ def pack(directory: str | Path, output: str | Path) -> Packed:
         part.unlink(missing_ok=True)
         raise
     try:
-        package = _read_back(out, version, members, data)
+        return _read_back(out, version, [name for name, _ in members], config_data)
     except BaseException:
         out.unlink(missing_ok=True)
         raise
-    return Packed(package, ignored, tuple(notes))
 
 
 def _read_back(out: Path, version, members: list[str], data: bytes) -> PackageInfo:

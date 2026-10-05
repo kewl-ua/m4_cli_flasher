@@ -1,5 +1,8 @@
 import contextlib
+import hashlib
 import io
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,10 +10,12 @@ from unittest.mock import MagicMock, patch
 
 from dji_duml.cli import main
 from dji_duml.errors import TransportError
+from dji_duml.package import inspect_package
 from dji_duml.profiles import M4T
 from duml_fixtures import (
     CURRENT, TARGET, VERSION_BODY, make_tar, usbpcap_file, usbpcap_record, version_request,
 )
+from store_fixtures import A, B, C, OLD, StoreCase, age, image, release_list
 
 try:
     import usb.core
@@ -139,6 +144,217 @@ class CliTests(unittest.TestCase):
         code, _, err = run("inspect", str(Path(self.directory.name) / "absent.bin"))
         self.assertEqual(code, 1)
         self.assertIn("Error", err)
+
+
+class FirmwareStoreCliTests(StoreCase):
+    """dji-duml fw and flash --from-store; the store comes from --store."""
+
+    def setUp(self):
+        super().setUp()
+        self.version = self.folder(TARGET, (A, B), start="2026/05/29")
+        self.partial = self.folder(OLD, (A, C))
+        (self.partial / C[0]).unlink()
+        self.journal = self.tmp / "journal.jsonl"
+
+    def fw(self, *argv):
+        return run("--store", str(self.root), "fw", *argv)
+
+    def filled(self):
+        self.assertEqual(self.fw("add", str(self.version), str(self.partial))[0], 0)
+
+    def flash(self, *extra, current=CURRENT, target=TARGET):
+        return run("--store", str(self.root), "--simulate", current, "--journal",
+                   str(self.journal), "flash", "--from-store", "--target", target,
+                   "--expected-current", CURRENT, "--yes", *extra)
+
+    def test_add_list_show_orphans_check(self):
+        code, out, err = self.fw("list")
+        self.assertEqual(code, 1)
+        self.assertIn("No firmware store", err)
+        code, out, _ = self.fw("add", str(self.version))
+        self.assertEqual(code, 0)
+        self.assertIn(f"store     {self.root.resolve()} (created)", out)  # /var on macOS
+        self.assertIn(f"versions  {TARGET}  not held -> ready 2/2", out)
+        self.assertIn(f"next      dji-duml flash --from-store --target {TARGET}", out)
+        self.fw("add", str(self.partial))
+        cache = self.src / "cache"
+        age(self.write(f"{1:032x}.cache", release_list((TARGET, "2026-05-29"),
+                                                       ("16.01.0006", "2025-12-22")), cache))
+        age(self.write(f"{2:032x}.cache", image(42), cache))
+        with patch.dict(os.environ, {"DJI_DUML_ASSISTANT_CACHE": str(cache)}):
+            code, listed, _ = self.fw("list")
+            self.assertIn("assistant firm_cache: 2 files, 2 not in the store", listed)
+            self.assertIn("next      dji-duml fw harvest", listed)
+            self.assertEqual(self.fw("harvest")[0], 0)
+            code, listed, _ = self.fw("list")
+            self.assertEqual(listed, self.fw()[1])  # bare fw is fw list
+        self.assertEqual(code, 0)
+        self.assertIn("assistant firm_cache: 2 files, all in the store", listed)
+        self.assertRegex(listed, rf"  {TARGET}  2026-05-29  ready      2/2  .*  folder\n")
+        self.assertRegex(listed, rf"  16.01.0006  2025-12-22  not held .*DJI release list only")
+        self.assertRegex(listed, rf"  {OLD} .* PARTIAL    1/2 .* missing 1 \({C[0]}, .*\): "
+                                 rf"fw show {OLD}")
+        self.assertIn("orphans   1 modules", listed)
+        self.assertIn("next      dji-duml flash --from-store --target <version>", listed)
+        code, out, _ = self.fw("show", "17.02.05.01")
+        self.assertEqual(code, 0)
+        self.assertIn(f"version   wa345t {TARGET}, released 2026-05-29 (formal)", out)
+        self.assertIn("release   from 2026/05/29, expire 2027/01/01, antirollback 0, enforce 0",
+                      out)
+        self.assertIn(f"note      Note for {TARGET}.", out)
+        code, out, _ = self.fw("show", OLD)
+        self.assertEqual(code, 1)
+        self.assertIn(f"md5 {hashlib.md5(C[1]).hexdigest()}", out)
+        self.assertIn("not in the store", out)
+        code, out, _ = self.fw("orphans")
+        self.assertEqual(code, 0)
+        self.assertIn("orphans   1 modules", out)
+        self.assertIn(f"{hashlib.sha256(image(42)).hexdigest()[:12]}", out)
+        code, out, _ = self.fw("check", "--full")
+        self.assertEqual(code, 0)
+        self.assertIn("checked   5 objects (0.0 MB rehashed), 2 configurations, 1 release lists: "
+                      "no problems", out)
+        stray = self.root / "objects" / "stray"
+        stray.write_bytes(b"x")
+        self.assertEqual(self.fw("check")[0], 2)
+        code, out, _ = self.fw("check", "--fix")
+        self.assertEqual(code, 0)
+        self.assertIn("fixed     stray file", out)
+
+    def test_export(self):
+        self.filled()
+        out = self.tmp / "out.bin"
+        code, text, _ = self.fw("export", TARGET, "-o", str(out))
+        self.assertEqual(code, 0)
+        self.assertIn("files     3,", text)
+        self.assertEqual(inspect_package(out).config_name, "wa345t.cfg.sig")
+        code, _, err = self.fw("export", TARGET, "-o", str(out))
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+        code, _, err = self.fw("export", OLD, "-o", str(self.tmp / "old.bin"))
+        self.assertEqual(code, 1)
+        self.assertIn("PARTIAL 1/2", err)
+        code, _, err = self.fw("export", TARGET, "-o", str(self.root / "in.bin"))
+        self.assertEqual(code, 1)
+        self.assertIn("inside the store", err)
+
+    def test_flash_from_store(self):
+        self.filled()
+        code, out, _ = self.flash()
+        self.assertEqual(code, 0, out)
+        self.assertIn("build     written and read back", out)
+        self.assertIn(f"Installed {TARGET} (was {CURRENT})", out)
+        self.assertEqual(list((self.root / "tmp").iterdir()), [])
+        events = [json.loads(line) for line in self.journal.read_text().splitlines()]
+        (event,) = [event for event in events if event["event"] == "store-package"]
+        config_sha = hashlib.sha256((self.version / "wa345t.cfg.sig").read_bytes()).hexdigest()
+        self.assertEqual((event["version"], event["config_sha256"]), (TARGET, config_sha))
+
+    def test_temporary_package_is_removed_however_the_flash_ends(self):
+        self.filled()
+        code, _, err = self.flash(current="17.00.0001")
+        self.assertEqual(code, 2)
+        self.assertIn("Nothing was changed", err)
+        self.assertEqual(list((self.root / "tmp").iterdir()), [])
+        with patch("dji_duml.cli.Flasher.run", side_effect=KeyboardInterrupt):
+            code, out, _ = self.flash()
+        self.assertEqual(code, 130)
+        self.assertEqual(list((self.root / "tmp").iterdir()), [])
+
+    def test_store_problems_are_refusals_before_anything_is_sent(self):
+        self.filled()
+        with patch("dji_duml.sim.SimulatedM4T") as drone:
+            for target, error in ((OLD, "PARTIAL 1/2"), ("16.01.0006", "is not held")):
+                code, _, err = self.flash(target=target)
+                self.assertEqual(code, 2)
+                self.assertIn(error, err)
+                self.assertIn("Nothing was sent.", err)
+        drone.assert_not_called()
+
+    def test_package_or_from_store(self):
+        for argv in (["flash", "x.bin", "--from-store"], ["flash"],
+                     ["flash", "x.bin", "--config", "0" * 8], ["flash", "x.bin", "--config", ""]):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit) as exit_:
+                run(*argv, "--target", TARGET, "--expected-current", CURRENT, "--yes")
+            self.assertEqual(exit_.exception.code, 2)
+
+    def test_a_cleanup_failure_does_not_replace_the_flash_result(self):
+        self.filled()
+        real = Path.unlink
+
+        def held(path, missing_ok=False):
+            if path.name.startswith("flash-") and path.exists():
+                raise PermissionError(13, "held by a virus scanner")
+            return real(path, missing_ok=missing_ok)
+
+        with patch.object(Path, "unlink", held):
+            code, out, err = self.flash()
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"Installed {TARGET} (was {CURRENT})", out)
+        self.assertRegex(out, r"note: could not delete .*flash-.*held by a virus scanner.*"
+                              "fw check --fix deletes it after 24 h")
+
+    def test_a_non_ascii_store_path_on_an_ascii_console(self):
+        self.root = self.tmp / "Артём" / "store"
+        self.filled()
+        raw = io.BytesIO()
+        out = io.TextIOWrapper(raw, encoding="ascii")  # errors="strict", like cp1252 pipes
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()) as err:
+            code = main(["--store", str(self.root), "--simulate", CURRENT, "--journal",
+                         str(self.tmp / "Артём" / "journal.jsonl"), "flash", "--from-store",
+                         "--target", TARGET, "--expected-current", CURRENT, "--yes"])
+        out.flush()
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn(b"\\u0410\\u0440\\u0442\\u0451\\u043c", raw.getvalue())
+        self.assertIn(f"Installed {TARGET}".encode(), raw.getvalue())
+
+    def test_an_os_error_of_the_store_is_a_refusal(self):
+        self.filled()
+        for target, error in (("dji_duml.cli.Store.open", PermissionError(13, "held")),
+                              ("dji_duml.cli.Store.select", ValueError("bad version 1.x"))):
+            with self.subTest(target=target), patch(target, side_effect=error), \
+                    patch("dji_duml.sim.SimulatedM4T") as drone:
+                code, _, err = self.flash()
+            self.assertEqual(code, 2)
+            self.assertIn("Nothing was sent.", err)
+            drone.assert_not_called()
+
+    def test_next_names_the_configuration_when_a_version_has_two(self):
+        other = self.folder(TARGET, (A, C))
+        code, out, _ = self.fw("add", str(self.version), str(other))
+        self.assertEqual(code, 0)
+        self.assertIn(f"versions  {TARGET}  not held -> ready x2", out)
+        self.assertIn(f"next      dji-duml fw show {TARGET}   (2 complete configurations: "
+                      "choose one with --config)", out)
+        shas = sorted(hashlib.sha256((folder / "wa345t.cfg.sig").read_bytes()).hexdigest()[:8]
+                      for folder in (self.version, other))
+        code, out, _ = self.fw("show", TARGET)
+        self.assertIn(f"--target {TARGET} --config <{shas[0]} or {shas[1]}>", out)
+        code, out, _ = self.fw("show", TARGET, "--config", shas[1])
+        self.assertIn(f"--target {TARGET} --config {shas[1]} --expected-current", out)
+        code, out, _ = self.fw("export", TARGET, "--config", shas[0], "-o",
+                               str(self.tmp / "out.bin"))
+        self.assertEqual(code, 0)
+        self.assertIn(f"next      dji-duml flash --from-store --target {TARGET} --config "
+                      f"{shas[0]} --expected-current", out)
+        code, _, err = self.flash("--config", shas[0])
+        self.assertEqual(code, 0, err)
+
+    def test_an_unreadable_configuration_is_shown(self):
+        self.filled()
+        data = (self.version / "wa345t.cfg.sig").read_bytes()
+        path = self.root / "objects" / hashlib.sha256(data).hexdigest()
+        os.chmod(path, 0o600)
+        path.write_bytes(data[:4] + bytes(len(data) - 4))  # same size: only the bytes differ
+        code, out, _ = self.fw("list")
+        self.assertIn(f"DAMAGED   unreadable config {path.name[:12]}: ", out)
+        self.assertIn("STORE DAMAGED: dji-duml fw check", out)
+        code, out, _ = self.fw("show", TARGET)
+        self.assertIn(f"DAMAGED   unreadable config {path.name[:12]}: ", out)
+
+    def test_store_help_names_the_default_off_windows(self):
+        from dji_duml.cli import build_parser
+        self.assertIn("~/.dji-duml/store", " ".join(build_parser().format_help().split()))
 
 
 @unittest.skipIf(usb is None, "pyusb is not installed")

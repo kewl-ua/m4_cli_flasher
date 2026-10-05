@@ -172,6 +172,29 @@ class FlasherTests(unittest.TestCase):
                 self.run_flash(drone)
         self.assertEqual(self.sent(drone), [])
 
+    def test_lock_file_of_another_user_is_opened_read_only(self):
+        # Linux refuses an O_CREAT open of another user's file in /tmp
+        # (fs.protected_regular), even to root; flock works on a read-only fd.
+        import os
+        from unittest.mock import patch
+        from dji_duml.flasher import _open_lock_file
+
+        path = Path(tempfile.mkdtemp()) / "dji-duml-test.lock"
+        path.write_bytes(b"")
+        real = os.open
+        modes = []
+
+        def protected(name, flags, *mode):
+            modes.append(flags)
+            if flags & os.O_CREAT:
+                raise PermissionError(13, "Permission denied")
+            return real(name, flags, *mode)
+
+        with patch("dji_duml.flasher.os.open", protected):
+            handle = _open_lock_file(path)
+        handle.close()
+        self.assertEqual(modes[-1], os.O_RDONLY)
+
     # -- aborted: upgrade mode entered, flashing never started -----------------
 
     def test_failures_before_start_never_request_start(self):
