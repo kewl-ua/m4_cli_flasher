@@ -128,6 +128,13 @@ class GimbalParams:
         )
 
     @property
+    def relative_yaw_deg(self) -> float:
+        value = self.yaw_angle_raw
+        if value & 0x8000:
+            value -= 0x10000
+        return value / 10.0
+
+    @property
     def quaternion_norm(self) -> float | None:
         if self.quaternion_wxyz is None:
             return None
@@ -154,6 +161,34 @@ class GimbalParams:
             1.0 - 2.0 * (y * y + z * z),
         ))
         return pitch, roll, yaw
+
+    @property
+    def quaternion_orientation_error_deg(self) -> float | None:
+        """Angular distance between quaternion and legacy Euler orientation.
+
+        Unlike per-axis Euler comparison this stays valid when pitch crosses
+        +/-90 degrees and the equivalent Euler representation changes branch.
+        """
+        if self.quaternion_wxyz is None:
+            return None
+        pitch, roll, yaw = (math.radians(value) for value in self.attitude_deg)
+        cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
+        cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
+        cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+        legacy_q = (
+            cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+        )
+        q = self.quaternion_wxyz
+        q_norm = sum(value * value for value in q) ** 0.5
+        legacy_norm = sum(value * value for value in legacy_q) ** 0.5
+        if q_norm <= 0 or legacy_norm <= 0:
+            return None
+        dot = abs(sum(a * b for a, b in zip(q, legacy_q)) / (q_norm * legacy_norm))
+        dot = max(-1.0, min(1.0, dot))
+        return math.degrees(2.0 * math.acos(dot))
 
 
 _GIMBAL_PREFIX = struct.Struct("<hhhBbHBB")
