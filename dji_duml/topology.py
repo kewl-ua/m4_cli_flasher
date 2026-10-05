@@ -486,7 +486,10 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         row[2].pitch_joint_deg if row[2].pitch_joint_deg is not None else 0.0
         for row in pairs
     ]
-    ext16 = [(row[2].extension_16_raw or 0) / 10.0 for row in pairs]
+    roll_joint = [
+        row[2].roll_joint_deg if row[2].roll_joint_deg is not None else 0.0
+        for row in pairs
+    ]
     relative_yaw = [row[2].relative_yaw_deg for row in pairs]
     ref10 = [
         row[2].yaw_reference_deg if row[2].yaw_reference_deg is not None else 0.0
@@ -499,7 +502,7 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
     ]
     roll_errors = [
         _angle_error_degrees(field, solved)
-        for field, solved in zip(ext16, rel_q_roll)
+        for field, solved in zip(roll_joint, rel_q_roll)
     ]
     yaw_errors = [
         _angle_error_degrees(field, solved)
@@ -520,14 +523,14 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
             _range(rel_q_pitch), _range(rel_q_roll), _range(rel_q_yaw)
         ),
         "field_ranges": (
-            _range(joint_pitch), _range(ext16), _range(relative_yaw)
+            _range(joint_pitch), _range(roll_joint), _range(relative_yaw)
         ),
         "pitch_joint_corr": _pearson(joint_pitch, rel_q_pitch),
         "pitch_joint_error_median": _median(pitch_errors),
         "pitch_joint_error_max": max(pitch_errors),
-        "ext16_roll_corr": _pearson(ext16, rel_q_roll),
-        "ext16_roll_error_median": _median(roll_errors),
-        "ext16_roll_error_max": max(roll_errors),
+        "roll_joint_corr": _pearson(roll_joint, rel_q_roll),
+        "roll_joint_error_median": _median(roll_errors),
+        "roll_joint_error_max": max(roll_errors),
         "relative_yaw_corr": _pearson(relative_yaw, rel_q_yaw),
         "relative_yaw_error_median": _median(yaw_errors),
         "relative_yaw_error_max": max(yaw_errors),
@@ -574,40 +577,6 @@ def _gimbal_angle_correlations(stream: TrafficStream) -> dict[str, dict[str, flo
             "roll": _pearson(raw16, roll),
             "yaw": _pearson(raw16, yaw),
         },
-    }
-
-
-def _gimbal_pitch_model(stream: TrafficStream) -> dict | None:
-    """Compare the M4T secondary pitch/joint field at 0x14 with packet pitch."""
-    if stream.cmd_set != 0x04 or stream.cmd_id != 0x05:
-        return None
-
-    from .telemetry import parse_gimbal_params
-
-    errors = []
-    joint = []
-    pitch = []
-    for _, payload in stream._samples:
-        try:
-            item = parse_gimbal_params(payload)
-        except UnexpectedReply:
-            continue
-        if item.pitch_joint_deg is None:
-            continue
-        joint.append(item.pitch_joint_deg)
-        pitch.append(item.attitude_deg[0])
-        errors.append(abs(item.pitch_joint_deg - item.attitude_deg[0]))
-
-    if not errors:
-        return None
-    ordered = sorted(errors)
-    median = ordered[len(ordered) // 2]
-    return {
-        "joint_range": _range(joint),
-        "pitch_range": _range(pitch),
-        "median_error": median,
-        "max_error": max(errors),
-        "correlation": _pearson(joint, pitch),
     }
 
 
@@ -899,18 +868,6 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                         corr_parts.append(f"{field_name}[{rendered}]")
                                 if corr_parts:
                                     lines.append("       angle-corr: " + "  ".join(corr_parts))
-                            pitch_model = _gimbal_pitch_model(stream)
-                            if pitch_model is not None:
-                                joint = pitch_model["joint_range"]
-                                packet_pitch = pitch_model["pitch_range"]
-                                corr = pitch_model["correlation"]
-                                corr_text = f"{corr:+.3f}" if corr is not None else "?"
-                                lines.append(
-                                    f"       pitch-model: packet={packet_pitch[0]:.1f}..{packet_pitch[1]:.1f}deg "
-                                    f"joint@14={joint[0]:.1f}..{joint[1]:.1f}deg "
-                                    f"corr={corr_text} median-error={pitch_model['median_error']:.3f}deg "
-                                    f"max-error={pitch_model['max_error']:.3f}deg"
-                                )
                             rate_correlations = _gimbal_rate_correlations(stream)
                             if rate_correlations:
                                 corr_parts = []
@@ -944,7 +901,7 @@ def report(topology: Topology, *, commands_per_module: int = 8,
             fc_pitch, fc_roll, fc_yaw = cross["fc_ranges"]
             g_pitch, g_roll, g_yaw = cross["gimbal_ranges"]
             solved_pitch, solved_roll, solved_yaw = cross["solved_relative_ranges"]
-            joint_pitch, ext16, relative_yaw = cross["field_ranges"]
+            joint_pitch, joint_roll, relative_yaw = cross["field_ranges"]
             lines.append(
                 "cross-attitude: "
                 f"pairs={cross['pairs']} "
@@ -972,7 +929,7 @@ def report(topology: Topology, *, commands_per_module: int = 8,
             lines.append(
                 "    relative-fields: "
                 f"joint@14={joint_pitch[0]:.1f}..{joint_pitch[1]:.1f} "
-                f"ext@16/10={ext16[0]:.1f}..{ext16[1]:.1f} "
+                f"joint-roll@16={joint_roll[0]:.1f}..{joint_roll[1]:.1f} "
                 f"yaw@08={relative_yaw[0]:.1f}..{relative_yaw[1]:.1f}deg"
             )
             lines.append(
@@ -980,9 +937,9 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                 f"pitch corr={corr(cross['pitch_joint_corr'])} "
                 f"err={cross['pitch_joint_error_median']:.2f}/"
                 f"{cross['pitch_joint_error_max']:.2f}deg median/max; "
-                f"roll corr={corr(cross['ext16_roll_corr'])} "
-                f"err={cross['ext16_roll_error_median']:.2f}/"
-                f"{cross['ext16_roll_error_max']:.2f}deg; "
+                f"roll corr={corr(cross['roll_joint_corr'])} "
+                f"err={cross['roll_joint_error_median']:.2f}/"
+                f"{cross['roll_joint_error_max']:.2f}deg; "
                 f"yaw corr={corr(cross['relative_yaw_corr'])} "
                 f"err={cross['relative_yaw_error_median']:.2f}/"
                 f"{cross['relative_yaw_error_max']:.2f}deg"
