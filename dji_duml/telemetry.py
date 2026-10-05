@@ -105,6 +105,37 @@ def quaternion_multiply(
     )
 
 
+def quaternion_axis_angle_deg(
+    axis: str,
+    angle_deg: float,
+) -> tuple[float, float, float, float]:
+    """Return an active rotation quaternion around x, y or z."""
+    half = math.radians(angle_deg) / 2.0
+    s = math.sin(half)
+    q = {
+        "x": (math.cos(half), s, 0.0, 0.0),
+        "y": (math.cos(half), 0.0, s, 0.0),
+        "z": (math.cos(half), 0.0, 0.0, s),
+    }.get(axis)
+    if q is None:
+        raise ValueError("axis must be x, y or z")
+    return q
+
+
+def quaternion_angular_distance_deg(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    """Shortest angular distance between two orientations."""
+    left_norm = sum(value * value for value in left) ** 0.5
+    right_norm = sum(value * value for value in right) ** 0.5
+    if left_norm <= 0 or right_norm <= 0:
+        raise ValueError("zero-norm quaternion")
+    dot = abs(sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm))
+    dot = max(-1.0, min(1.0, dot))
+    return math.degrees(2.0 * math.acos(dot))
+
+
 def quaternion_to_euler_deg(
     quaternion: tuple[float, float, float, float],
 ) -> tuple[float, float, float]:
@@ -263,14 +294,7 @@ class GimbalParams:
         if self.quaternion_wxyz is None:
             return None
         legacy_q = euler_deg_to_quaternion(self.attitude_deg)
-        q = self.quaternion_wxyz
-        q_norm = sum(value * value for value in q) ** 0.5
-        legacy_norm = sum(value * value for value in legacy_q) ** 0.5
-        if q_norm <= 0 or legacy_norm <= 0:
-            return None
-        dot = abs(sum(a * b for a, b in zip(q, legacy_q)) / (q_norm * legacy_norm))
-        dot = max(-1.0, min(1.0, dot))
-        return math.degrees(2.0 * math.acos(dot))
+        return quaternion_angular_distance_deg(self.quaternion_wxyz, legacy_q)
 
 
 _GIMBAL_PREFIX = struct.Struct("<hhhBbHBB")
