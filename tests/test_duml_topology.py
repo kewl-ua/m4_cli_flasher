@@ -147,6 +147,7 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("i16@28->pitch=+1.000", text)
         self.assertIn("i16@35->pitch=+1.000", text)
         self.assertIn("tail-state@33:", text)
+        self.assertNotIn("tail-state@36:", text)
 
     def test_flyc_tail_counter_candidate_estimates_frequency(self):
         topology = Topology(host=0x2A)
