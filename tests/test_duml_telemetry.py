@@ -36,10 +36,10 @@ class FlycOsdGeneralTests(unittest.TestCase):
         with self.assertRaises(UnexpectedReply):
             parse_flyc_osd_general(bytes(35))
 
-    def test_generic_decoder_selects_only_flyc_03_43_push(self):
+    def test_generic_decoder_selects_known_pushes_only(self):
         frame = Frame(0x03, 0x0A, 1, 0x03, 0x43, self.SAMPLE, ack=0)
         self.assertIsInstance(decode_known(frame), FlycOsdGeneral)
-        self.assertIsNone(decode_known(Frame(0x04, 0x2A, 1, 0x04, 0x05, b"", ack=0)))
+        self.assertIsNone(decode_known(Frame(0x04, 0x2A, 1, 0x04, 0x06, b"", ack=0)))
         self.assertIsNone(decode_known(
             Frame(0x03, 0x0A, 1, 0x03, 0x43, self.SAMPLE, response=True)
         ))
