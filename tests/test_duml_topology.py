@@ -1,3 +1,4 @@
+import struct
 import unittest
 
 from dji_duml import commands
@@ -160,6 +161,52 @@ class PassiveTopologyTests(unittest.TestCase):
         text = report(topology, verbose=True)
         self.assertIn("rate-corr:", text)
         self.assertIn("i16@14[pitch=+1.000", text)
+
+    def test_cross_yaw_diagnostics_pair_fc_and_gimbal(self):
+        topology = Topology(host=0x2A)
+
+        def fc_payload(yaw_tenths):
+            return struct.pack(
+                "<ddhhhhhhhBBI",
+                0.0, 0.0,
+                0, 0, 0, 0,
+                0, 0, yaw_tenths,
+                0, 0, 0,
+            )
+
+        def gimbal_payload(stamp, yaw_tenths, reference_hundredths, relative_tenths):
+            return struct.pack(
+                "<hhhBbHBBIhhhh",
+                0, 0, yaw_tenths,
+                0x82, 0,
+                relative_tenths & 0xFFFF,
+                0, 1,
+                stamp,
+                reference_hundredths,
+                0, 0, 0,
+            )
+
+        samples = [
+            (1.00, -800, -8000, 100),
+            (2.00, -600, -6000, 100),
+            (3.00, -400, -4000, 100),
+        ]
+        for seq, (ts, fc_yaw, ref, rel) in enumerate(samples, 1):
+            topology.observe(
+                Frame(0x03, 0x0A, seq, 0x03, 0x43, fc_payload(fc_yaw), ack=0),
+                ts,
+            )
+            topology.observe(
+                Frame(0x04, 0x2A, seq, 0x04, 0x05,
+                      gimbal_payload(seq * 1000, fc_yaw + rel, ref, rel), ack=0),
+                ts + 0.02,
+            )
+
+        text = report(topology, verbose=True)
+        self.assertIn("cross-yaw: pairs=3", text)
+        self.assertIn("fc-ref=+1.000", text)
+        self.assertIn("fc-gimbal=+1.000", text)
+        self.assertIn("fc-ref-error: median=0.000deg max=0.000deg", text)
 
     def test_report_distinguishes_confirmed_and_candidates(self):
         host = address(10, 1)
