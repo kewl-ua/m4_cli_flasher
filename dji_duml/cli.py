@@ -8,7 +8,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import commands, pcap
+from . import commands, installed, params, pcap
 from .client import DumlClient
 from .errors import (
     DumlError, FlashAborted, FlashFailed, FlashOutcomeUnknown, FlashRefused,
@@ -176,6 +176,94 @@ def cmd_decode(args, profile) -> int:
     return 0
 
 
+def _frames(args):
+    entries, _ = pcap.decode(args.capture, device=args.device)
+    return [entry.frame for entry in entries]
+
+
+def cmd_params(args, profile) -> int:
+    if args.capture:
+        found = params.from_frames(_frames(args))
+        if not found:
+            _say("No flight controller parameters (03/E1) in this capture.")
+            return 2
+    else:
+        journal = Journal(args.journal)
+
+        def progress(done: int, total: int) -> None:
+            if done % 100 == 0 or done == total:
+                print(f"\r{done}/{total} items", end="" if done < total else "\n",
+                      file=sys.stderr, flush=True)
+
+        with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+            info, found = params.read(client, on_progress=progress)
+        print(f"table {info.table}: {info.count} indexes, {len(found)} items, "
+              f"crc {info.crc:08x}", file=sys.stderr)
+    shown = [item for item in found
+             if (not args.changed or item.changed)
+             and (not args.name or args.name.lower() in item.name.lower())]
+    if args.json:
+        for item in shown:
+            _say(json.dumps({"table": item.table, "index": item.index, "name": item.name,
+                             "type": item.type_name, "value": item.value,
+                             "raw": None if item.raw is None else item.raw.hex(),
+                             "default": item.default, "min": item.minimum,
+                             "max": item.maximum}))
+    else:
+        for item in shown:
+            def show(value):
+                return f"{value:g}" if isinstance(value, float) else str(value)
+            _say(_ascii(f"{item.index:5} {item.type_name:4} {'*' if item.changed else ' '} "
+                        f"{params.format_value(item):>12}  default {show(item.default):<10} "
+                        f"[{show(item.minimum)}..{show(item.maximum)}]  {item.name}"))
+    print(f"{len(shown)} of {len(found)} parameters shown"
+          + ("; * = differs from default" if not args.json else ""), file=sys.stderr)
+    return 0
+
+
+def cmd_manifest(args, profile) -> int:
+    if args.capture:
+        data = installed.config_from_frames(_frames(args), profile.upgrade_center)
+        if data is None:
+            _say("No complete read of the installed configuration (00/4F type 01) "
+                 "in this capture.")
+            return 2
+    else:
+        if profile.upgrade_center is None:
+            raise DumlError(f"{profile.name} has no known upgrade center.")
+        journal = Journal(args.journal)
+        with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+            data = installed.read_config(client, profile.upgrade_center)
+    config = installed.describe(data, profile.product_code)
+    if args.output:
+        with open(args.output, "xb") as handle:
+            handle.write(config.data)
+    if args.json:
+        _say(json.dumps({"version": str(config.version) if config.version else None,
+                         "size": len(config.data), "md5": config.md5.hex(),
+                         "modules": [{"name": item.name, "size": item.size,
+                                      "md5": item.md5.hex()} for item in config.modules]}))
+    else:
+        _say(f"version   {config.version or 'unknown: no readable manifest'}")
+        _say(f"config    {len(config.data)} bytes, md5 {config.md5.hex()}")
+        _say(f"modules   {len(config.modules)}")
+        for item in config.modules:
+            _say(_ascii(f"  {item.size:>11} {item.md5.hex()} {item.name}"))
+        if args.output:
+            _say(f"saved     {args.output}")
+    if not args.compare:
+        return 0
+    package = inspect_package(args.compare)
+    differences = installed.compare(config, package)
+    if not differences:
+        _say(f"The drone runs exactly {package.path.name} ({package.version}).")
+        return 0
+    _say(f"The drone does not run {package.path.name}:")
+    for line in differences:
+        _say(_ascii(f"  {line}"))
+    return 2
+
+
 def _ascii(text: str) -> str:
     """Text from a capture or manifest, printable on any console."""
     return text.encode("ascii", "backslashreplace").decode("ascii")
@@ -320,6 +408,25 @@ def build_parser() -> argparse.ArgumentParser:
     decode.add_argument("--full", action="store_true", help="do not truncate payloads")
     decode.add_argument("--json", action="store_true", help="one JSON object per frame")
 
+    manifest = sub.add_parser(
+        "manifest", help="read the signed manifest of the firmware installed on the drone")
+    manifest.add_argument("--capture", help="take it from a capture of Assistant instead of USB")
+    manifest.add_argument("--device", type=_number, help="with --capture: USB device address")
+    manifest.add_argument("-o", "--output", help="save the .cfg.sig to this new file")
+    manifest.add_argument("--compare", metavar="PACKAGE",
+                          help="check whether the drone runs exactly this package")
+    manifest.add_argument("--json", action="store_true", help="one JSON object")
+
+    parameters = sub.add_parser(
+        "params", help="read the flight controller's parameters (config table 0)")
+    parameters.add_argument("--capture",
+                            help="take them from a capture of Assistant instead of USB")
+    parameters.add_argument("--device", type=_number, help="with --capture: USB device address")
+    parameters.add_argument("--changed", action="store_true",
+                            help="only parameters whose value differs from the default")
+    parameters.add_argument("--name", help="only names containing this text")
+    parameters.add_argument("--json", action="store_true", help="one JSON object per parameter")
+
     extractor = sub.add_parser(
         "extract", help="recover the files a capture shows being sent to the upgrade center")
     extractor.add_argument("capture", help="pcap or pcapng, USBPcap or usbmon")
@@ -354,7 +461,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 HANDLERS = {"scan": cmd_scan, "version": cmd_version, "inspect": cmd_inspect,
             "plan": cmd_plan, "decode": cmd_decode, "extract": cmd_extract,
-            "pack": cmd_pack, "flash": cmd_flash}
+            "pack": cmd_pack, "flash": cmd_flash, "manifest": cmd_manifest,
+            "params": cmd_params}
 
 
 def main(argv: list[str] | None = None) -> int:

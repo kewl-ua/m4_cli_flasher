@@ -8,11 +8,12 @@ real device behaves this way in every case.
 from __future__ import annotations
 
 import hashlib
+import struct
 import time
 from collections import Counter
 from pathlib import Path
 
-from . import commands
+from . import commands, params
 from .client import DumlClient
 from .errors import TransportError
 from .frame import AckType, Frame, StreamParser
@@ -204,6 +205,27 @@ GREETING_REPLIES = {
 }
 
 
+def installed_config(version: FirmwareVersion, product: str = "wa345t") -> bytes:
+    """A .cfg.sig shaped like DJI's for ``version``: IM*H header and manifest."""
+    module = f"{product}_0802_v10.00.21.17_20260529.ar0.pro.fw.sig"
+    xml = (f'<?xml version="1.0" encoding="utf-8"?>\n<dji>\n<device id="{product}">'
+           f'<firmware formal="{version}"><release version="{version}">'
+           f'<module id="0802" size="20480" md5="{"0" * 32}">{module}</module>'
+           "</release></firmware></device>\n</dji>\n")
+    return b"IM*H" + bytes(604) + xml.encode() + bytes(256)
+
+
+#: Flight controller config table 0: index -> (type id, size, default, min,
+#: max, name, value); indexes not listed answer 03/E1 with status 0x0E.
+FC_PARAMS = {
+    0: (0, 1, 0, 0, 18, "sweep_test_flag", 0),
+    2: (8, 4, 180.0, 0.0, 1000.0, "sweep_total_t_A__PRBS_period", 180.0),
+    3: (1, 2, 120, 20, 1500, "g_config.flying_limit.max_height", 500),
+    5: (5, 2, 100, 20, 150, "basic_gain_roll_usr", 100),
+    6: (9, 8, 0, 0, 0, "imu0.lati", 0.0),
+}
+
+
 class SimulatedM4T(SimulatedDrone):
     """The M4T upgrade center (0x48) as DJI Assistant's captures show it.
 
@@ -226,8 +248,13 @@ class SimulatedM4T(SimulatedDrone):
                  reboots: int = 1, zero_version_reads: int = 2, progress_every: int = 1250,
                  end_status: dict[str, int] | None = None, stop_after_files: int | None = None,
                  mute_progress: bool = False, lose=(), repeat_reports: int = 1,
-                 tick: float | None = None, **options):
+                 tick: float | None = None, config: bytes | None = None,
+                 fc_params: dict | None = None, **options):
         super().__init__(profile, firmware, **options)
+        #: The installed .cfg.sig 00/4F type 01 returns; by default one for
+        #: the running firmware.
+        self.config = config
+        self.fc_params = FC_PARAMS if fc_params is None else fc_params
         self.center = profile.upgrade_center
         self.reboots = reboots
         self.zero_version_reads = zero_version_reads
@@ -316,7 +343,46 @@ class SimulatedM4T(SimulatedDrone):
             count += 1
         return first, count
 
+    def _flyc(self, link: _Link, frame: Frame) -> None:
+        """03/E0, E1 and E2 of config table 0 as the M4T answers them."""
+        payload, count = frame.payload, max(self.fc_params, default=-1) + 1
+        if frame.cmd_id == params.TABLE_ATTRIBUTE and len(payload) == 2:
+            table = int.from_bytes(payload, "little")
+            self._answer(link, frame, struct.pack("<HHII", 0, 0, 0xDDB5B586, count)
+                         if table == 0 else b"\x09\x00")
+            return
+        if frame.cmd_id == params.ITEM_ATTRIBUTE and len(payload) == 4:
+            table, index = struct.unpack("<HH", payload)
+        elif frame.cmd_id == params.ITEM_VALUE and len(payload) == 6:
+            table, _, index = struct.unpack("<HHH", payload)
+        else:
+            return
+        item = self.fc_params.get(index) if table == 0 else None
+        if item is None:
+            self._answer(link, frame, bytes([params.NO_ITEM, 0]))
+            return
+        type_id, size, default, low, high, name, value = item
+        form, kind = params.TYPES[type_id]
+        if frame.cmd_id == params.ITEM_ATTRIBUTE:
+            limits = struct.pack("<" + kind * 3, default, low, high)
+            self._answer(link, frame, struct.pack("<HHHHH", 0, table, index, type_id, size)
+                         + limits + name.encode() + b"\0")
+        else:
+            self._answer(link, frame, struct.pack("<HHH", 0, 0, index) + struct.pack(form, value))
+
+    def _config_chunk(self, link: _Link, frame: Frame) -> None:
+        data = self.config if self.config is not None else installed_config(self.firmware)
+        offset = int.from_bytes(frame.payload[1:5], "little")
+        chunk = data[offset:offset + 256]
+        left = max(len(data) - offset - len(chunk), 0)
+        self._answer(link, frame, b"\x00" + struct.pack("<II", len(chunk), left) + chunk)
+
     def handle(self, link: _Link, frame: Frame) -> None:
+        if frame.receiver == params.FLIGHT_CONTROLLER and frame.cmd_set == commands.FLYC \
+                and not frame.response:
+            self.received.append(frame)
+            self._flyc(link, frame)
+            return
         if frame.receiver == self.center and frame.cmd_set == commands.GENERAL:
             self.received.append(frame)
             if frame.response:
@@ -360,6 +426,8 @@ class SimulatedM4T(SimulatedDrone):
         elif cmd == commands.UPGRADE_INSTALL:
             self._answer(link, frame, b"\x06")
             self._install(link)
+        elif cmd == commands.UPGRADE_RESULT and payload[:1] == b"\x01" and len(payload) == 9:
+            self._config_chunk(link, frame)
         elif cmd == commands.UPGRADE_RESULT:
             self._answer(link, frame, b"\x00\x04" + bytes(7) + _center_version(self.firmware))
         elif cmd == commands.PUSH_CONTROL:

@@ -34,12 +34,25 @@ GENERAL_NAMES = {
     0x81: "Upgrade Center Info", 0x82: "Upgrade Center State", 0x83: "Upgrade Prepare",
     0x84: "Upgrade Announce", 0x85: "Upgrade Install",
     0x51: "Get Serial Number", 0xFF: "Query Device Info",
+    0x32: "Activate Config", 0x4A: "Set Date/Time", 0xF1: "Self Test State",
+}
+
+FLYC = 0x03
+#: Flight controller commands seen in Assistant's idle capture of an M4T,
+#: named after the dji-firmware-tools flyc dissector.
+FLYC_NAMES = {
+    0x43: "OSD General Data", 0xAF: "Product Config", 0xCE: "Push Forbid Data",
+    0xDF: "Assistant Unlock", 0xE0: "Cfg Table Attribute", 0xE1: "Cfg Item Attribute",
+    0xE2: "Cfg Item Value", 0xE3: "Cfg Item Set", 0xE4: "Cfg Item Reset",
+    0xE5: "Push Cfg Table Attr", 0xE9: "Cfg Command Table",
 }
 
 
 def command_name(cmd_set: int, cmd_id: int) -> str:
     if cmd_set == GENERAL and cmd_id in GENERAL_NAMES:
         return GENERAL_NAMES[cmd_id]
+    if cmd_set == FLYC and cmd_id in FLYC_NAMES:
+        return FLYC_NAMES[cmd_id]
     return f"set {cmd_set:02x} id {cmd_id:02x}"
 
 
