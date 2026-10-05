@@ -745,7 +745,13 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
     if stream.cmd_set != 0x03 or stream.cmd_id != 0x43:
         return None
 
-    from .telemetry import parse_flyc_osd_general
+    from .telemetry import (
+        euler_deg_to_quaternion,
+        parse_flyc_osd_general,
+        quaternion_conjugate,
+        quaternion_multiply,
+        quaternion_rotation_vector_deg,
+    )
 
     rows = []
     for timestamp, payload in stream._samples:
@@ -829,6 +835,37 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         for name in ("height", "vx", "vy", "vz", "pitch", "roll", "yaw")
     }
 
+    body_rate_signals = {
+        name: [None] * len(rows)
+        for name in ("omega_x", "omega_y", "omega_z", "omega_mag")
+    }
+    for index in range(1, len(rows)):
+        previous_time, _, previous = rows[index - 1]
+        current_time, _, current = rows[index]
+        if previous_time is None or current_time is None:
+            continue
+        dt = current_time - previous_time
+        if not 0.1 <= dt <= 1.0:
+            continue
+        previous_q = euler_deg_to_quaternion(
+            (previous["pitch"], previous["roll"], previous["yaw"])
+        )
+        current_q = euler_deg_to_quaternion(
+            (current["pitch"], current["roll"], current["yaw"])
+        )
+        delta_q = quaternion_multiply(
+            quaternion_conjugate(previous_q),
+            current_q,
+        )
+        rx, ry, rz = quaternion_rotation_vector_deg(delta_q)
+        wx, wy, wz = rx / dt, ry / dt, rz / dt
+        body_rate_signals["omega_x"][index] = wx
+        body_rate_signals["omega_y"][index] = wy
+        body_rate_signals["omega_z"][index] = wz
+        body_rate_signals["omega_mag"][index] = (
+            wx * wx + wy * wy + wz * wz
+        ) ** 0.5
+
     # Derivatives use host receive time. They are hints only because 03/43 has
     # no verified device timestamp and is only ~2 Hz.
     rate_signals = {
@@ -888,6 +925,7 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
     correlations = []
     rate_correlations = []
     second_rate_correlations = []
+    body_rate_correlations = []
     for offset in range(start, end - 1):
         unsigned = [
             int.from_bytes(payload[offset:offset + 2], "little", signed=False)
@@ -952,6 +990,26 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
                     "corr": corr,
                     "unique": len(set(raw_values)),
                 })
+            for signal, target in body_rate_signals.items():
+                paired = [
+                    (numeric[index], value)
+                    for index, value in enumerate(target)
+                    if value is not None
+                ]
+                if len(paired) < 3:
+                    continue
+                raw_values = [item[0] for item in paired]
+                body_values = [item[1] for item in paired]
+                corr = _pearson(raw_values, body_values)
+                if corr is None or abs(corr) < 0.70:
+                    continue
+                body_rate_correlations.append({
+                    "offset": offset,
+                    "type": signedness,
+                    "signal": signal,
+                    "corr": corr,
+                    "unique": len(set(raw_values)),
+                })
 
     correlations.sort(
         key=lambda item: (-abs(item["corr"]), item["offset"], item["type"], item["signal"])
@@ -960,6 +1018,9 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         key=lambda item: (-abs(item["corr"]), item["offset"], item["type"], item["signal"])
     )
     second_rate_correlations.sort(
+        key=lambda item: (-abs(item["corr"]), item["offset"], item["type"], item["signal"])
+    )
+    body_rate_correlations.sort(
         key=lambda item: (-abs(item["corr"]), item["offset"], item["type"], item["signal"])
     )
 
@@ -1072,6 +1133,7 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         "correlations": correlations[:12],
         "rate_correlations": rate_correlations[:12],
         "second_rate_correlations": second_rate_correlations[:12],
+        "body_rate_correlations": body_rate_correlations[:12],
         "counter_candidates": counter_candidates,
         "categorical_states": categorical_states,
         "legacy_slots": legacy_slots,
