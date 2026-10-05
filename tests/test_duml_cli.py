@@ -15,7 +15,7 @@ from dji_duml.profiles import M4T
 from duml_fixtures import (
     CURRENT, TARGET, VERSION_BODY, make_tar, usbpcap_file, usbpcap_record, version_request,
 )
-from store_fixtures import A, B, C, OLD, StoreCase, age, image, release_list
+from store_fixtures import A, B, C, OLD, StoreCase, age, config, image, release_list
 
 try:
     import usb.core
@@ -166,6 +166,34 @@ class FirmwareStoreCliTests(StoreCase):
         return run("--store", str(self.root), "--simulate", current, "--journal",
                    str(self.journal), "flash", "--from-store", "--target", target,
                    "--expected-current", CURRENT, "--yes", *extra)
+
+    def status(self, drone_config, current):
+        with patch("dji_duml.sim._config_for", return_value=drone_config):
+            plain = run("--store", str(self.root), "--simulate", current, "fw", "status")
+            js = run("--store", str(self.root), "--simulate", current, "fw", "status", "--json")
+        return plain, js
+
+    def test_status(self):
+        self.filled()  # store holds TARGET (ready 2/2) and OLD (PARTIAL 1/2, missing C)
+        # (1) the drone runs exactly the stored, complete TARGET configuration
+        (code, out, _), (_, js, _) = self.status(config(TARGET, (A, B), start="2026/05/29"), TARGET)
+        self.assertEqual(code, 0, out)
+        self.assertIn("installed ready in the store", out)
+        obj = json.loads(js)
+        self.assertEqual(obj["installed"]["state"], "ready")
+        self.assertFalse(obj["store_damaged"])
+        self.assertIn(TARGET, [version["version"] for version in obj["ready"]])
+        # (2) the drone runs a configuration the store does not hold (modules are present)
+        (code, out, _), _ = self.status(config(CURRENT, (A, B)), CURRENT)
+        self.assertEqual(code, 0, out)
+        self.assertIn("installed not in the store", out)
+        self.assertIn(TARGET, out)  # offered as a version to move to
+        # (3) the drone's configuration is held but incomplete -> report the bad module, not "0"
+        (code, out, _), _ = self.status(config(OLD, (A, C)), OLD)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PARTIAL", out)
+        self.assertIn("not ready", out)
+        self.assertIn(C[0], out)
 
     def test_add_list_show_orphans_check(self):
         code, out, err = self.fw("list")

@@ -138,6 +138,31 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("No complete read", err)
 
+    def test_roles(self):
+        config = manifest(TARGET, modules=[
+            ("wa345t_0103_v02.74.00.88_20250225_IA640.pro.fw.sig", b"a"),
+            ("wa345t_1200_v01.35.01.13_20231229_mc01.pro.fw.sig", b"bb"),
+            ("wa345t_2405_v27.02.02.36_20250509_ld04.pro.fw.sig", b"ccc"),
+        ])
+        path = capture(self.tmp / "roles.pcap", config_reads(config, 40))
+        code, out, _ = run("manifest", "--capture", str(path), "--roles")
+        self.assertEqual(code, 0, out)
+        self.assertIn("thermal camera", out)
+        self.assertIn("ESC / motor controller", out)
+        self.assertIn("laser rangefinder  ~", out)  # the approximate marker
+        self.assertIn("roles     ", out)            # the legend header
+        # without --roles the plain output carries no role column or legend
+        code, plain, _ = run("manifest", "--capture", str(path))
+        self.assertNotIn("thermal camera", plain)
+        self.assertNotIn("roles     ", plain)
+        code, out, _ = run("manifest", "--capture", str(path), "--roles", "--json")
+        mods = json.loads(out)["modules"]
+        self.assertEqual({module["role"] for module in mods},
+                         {"thermal camera", "ESC / motor controller", "laser rangefinder"})
+        thermal = next(module for module in mods if module["role"] == "thermal camera")
+        self.assertEqual((thermal["module_type"], thermal["module_index"], thermal["approximate"]),
+                         (1, 3, False))
+
 
 class ParamsTests(unittest.TestCase):
     # Replies as idle.pcap has them.

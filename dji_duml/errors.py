@@ -28,6 +28,22 @@ class FlashRefused(DumlError):
     """A precondition failed. Nothing was sent that changes the device."""
 
 
+class WriteRefused(DumlError):
+    """A parameter write precondition failed (bad value, range, stale
+    expectation or a missing authorization). Nothing that changes the
+    device was sent."""
+
+
+class WriteFailed(DumlError):
+    """A parameter write was sent, but reading the value back does not show
+    the value that was requested. The device's state is whatever the
+    read-back reported; it is named so the old value can be restored."""
+
+    def __init__(self, message: str, *, read_back: int | float | None = None):
+        self.read_back = read_back
+        super().__init__(message)
+
+
 class FlashAborted(DumlError):
     """Stopped after upgrade mode was entered but before start was requested."""
 

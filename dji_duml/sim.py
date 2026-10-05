@@ -249,7 +249,8 @@ class SimulatedM4T(SimulatedDrone):
                  end_status: dict[str, int] | None = None, stop_after_files: int | None = None,
                  mute_progress: bool = False, lose=(), repeat_reports: int = 1,
                  tick: float | None = None, installed_config: bytes | None = None,
-                 params: list[tuple] | None = None, **options):
+                 params: list[tuple] | None = None, require_unlock: bool = False,
+                 ignore_writes=(), **options):
         super().__init__(profile, firmware, **options)
         self.center = profile.upgrade_center
         #: What 00/4F type 01 returns; by default a manifest of ``firmware``.
@@ -257,6 +258,15 @@ class SimulatedM4T(SimulatedDrone):
         #: Flight controller config table 0: (index, type id, default, minimum,
         #: maximum, name, value bytes); indexes in between have no item.
         self.params = SIM_PARAMS if params is None else params
+        #: Whether 03/DF Assistant Unlock has been received this session.
+        self.unlocked = False
+        #: When True, E3 writes are rejected (status 9) until an unlock arrives.
+        self.require_unlock = require_unlock
+        #: Indexes whose E3 reply is a success that does not persist -- the value
+        #: silently reverts -- to exercise the read-back confirmation.
+        self.ignore_writes = set(ignore_writes)
+        #: Every accepted write, as (index, value bytes), in order.
+        self.writes: list[tuple[int, bytes]] = []
         self.reboots = reboots
         self.zero_version_reads = zero_version_reads
         self.progress_every = progress_every
@@ -398,6 +408,24 @@ class SimulatedM4T(SimulatedDrone):
             item = items.get(index)
             self._answer(link, frame, b"\x0e\x00" if item is None
                          else struct.pack("<HHH", 0, 0, index) + item[6])
+        elif frame.cmd_id == 0xDF and len(payload) == 4:
+            if struct.unpack_from("<I", payload)[0]:
+                self.unlocked = True
+            self._answer(link, frame, b"\x00")  # unlock status is a single byte
+        elif frame.cmd_id == 0xE3 and len(payload) >= 6 and payload[:4] == b"\x00\x00\x01\x00":
+            index = struct.unpack_from("<H", payload, 4)[0]
+            value, item = payload[6:], items.get(index)
+            if item is None or len(value) != len(item[6]) \
+                    or (self.require_unlock and not self.unlocked):
+                self._answer(link, frame, b"\x09\x00")
+                return
+            self.writes.append((index, value))
+            if index not in self.ignore_writes:  # otherwise accepted but not stored
+                self.params = [(*item[:6], value) if entry[0] == index else entry
+                               for entry in self.params]
+            # success echo of the requested value (not re-read from storage, so
+            # with ignore_writes it differs from what is stored -- a reverting device)
+            self._answer(link, frame, struct.pack("<HHH", 0, 0, index) + value)
         else:
             self._answer(link, frame, b"\x09\x00")
 

@@ -183,6 +183,39 @@ def read(client: DumlClient, receiver: int = FLIGHT_CONTROLLER, table: int = 0, 
     return info, found
 
 
+def read_one(client: DumlClient, index: int, receiver: int = FLIGHT_CONTROLLER, table: int = 0, *,
+             timeout: float = 1.0) -> Param | None:
+    """One item's attributes and current value, or None for an index with no
+    item. Reads only (E1 then E2), so each request is retried."""
+    reader = _Reader(client, receiver, timeout)
+    item = parse_item(reader.ask(ITEM_ATTRIBUTE, item_request(table, index)))
+    if item is None:
+        return None
+    if (item.table, item.index) != (table, index):
+        raise UnexpectedReply(f"Asked for item {table}/{index}, got {item.table}/{item.index}.")
+    value = parse_value(reader.ask(ITEM_VALUE, value_request(table, index)))
+    if value is not None and value[:2] == (table, index):
+        item = replace(item, raw=value[2])
+    return item
+
+
+def find(client: DumlClient, name: str, receiver: int = FLIGHT_CONTROLLER, table: int = 0, *,
+         timeout: float = 1.0, on_progress: Callable[[int, int], None] | None = None) -> int:
+    """The index of the item with exactly this name. Reads attributes (E1)
+    only, no values. Raises LookupError if no item has the name."""
+    reader = _Reader(client, receiver, timeout)
+    info = parse_table(reader.ask(TABLE_ATTRIBUTE, table_request(table)))
+    if info.count > 0x10000:
+        raise UnexpectedReply(f"Config table {table} claims {info.count} indexes.")
+    for index in range(info.count):
+        item = parse_item(reader.ask(ITEM_ATTRIBUTE, item_request(table, index)))
+        if item is not None and item.name == name:
+            return index
+        if on_progress is not None:
+            on_progress(index + 1, info.count)
+    raise LookupError(f"No parameter named {name!r} in config table {table}.")
+
+
 def from_frames(frames: Iterable[Frame], receiver: int = FLIGHT_CONTROLLER) -> list[Param]:
     """The items of the last table read a capture holds, each with a value
     only if it was read after that item's attributes. Replies are matched to

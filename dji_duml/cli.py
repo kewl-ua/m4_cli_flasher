@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -12,10 +13,11 @@ from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
-from . import commands, installed, params, pcap
+from . import commands, installed, params, pcap, roles, writes
 from .client import DumlClient
 from .errors import (
     DumlError, FlashAborted, FlashFailed, FlashOutcomeUnknown, FlashRefused,
+    WriteFailed, WriteRefused,
 )
 from .display import ProgressView
 from .extract import REPORT, extract
@@ -29,7 +31,8 @@ from .profiles import PROFILES, get_profile
 from .store import Store, StoreError, assistant_cache, size_text
 from .version import FirmwareVersion
 
-EXIT_CODES = {FlashRefused: 2, FlashAborted: 3, FlashFailed: 4, FlashOutcomeUnknown: 5}
+EXIT_CODES = {FlashRefused: 2, FlashAborted: 3, FlashFailed: 4, FlashOutcomeUnknown: 5,
+              WriteRefused: 2, WriteFailed: 4}
 UPGRADE_IDS = {0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0F, 0x20, 0x21, 0x22, 0x23, 0x24,
                0x25, 0x26, 0x27, 0x28, 0x2A, 0x40, 0x41, 0x42, 0x43, 0x4F,
                0x81, 0x82, 0x83, 0x84, 0x85}
@@ -109,20 +112,25 @@ def _capture_frames(path):
     return (entry.frame for entry in pcap.iter_frames(path))
 
 
+def _installed_config(args, profile) -> bytes | None:
+    """The drone's installed .cfg.sig, read from the drone or from
+    --capture; None when the capture holds no complete read."""
+    if args.capture:
+        return installed.config_from_frames(_capture_frames(args.capture),
+                                            profile.upgrade_center)
+    journal = Journal(args.journal)
+    with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+        return installed.read_config(client, profile.upgrade_center)
+
+
 def cmd_manifest(args, profile) -> int:
     if args.output and Path(args.output).exists():  # before anything is read
         raise FileExistsError(f"{args.output} already exists; manifest -o never overwrites.")
-    if args.capture:
-        data = installed.config_from_frames(_capture_frames(args.capture),
-                                            profile.upgrade_center)
-        if data is None:
-            print("No complete read of the installed configuration (00/4F type 01) in this "
-                  "capture.", file=sys.stderr)
-            return 2
-    else:
-        journal = Journal(args.journal)
-        with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
-            data = installed.read_config(client, profile.upgrade_center)
+    data = _installed_config(args, profile)
+    if data is None:
+        print("No complete read of the installed configuration (00/4F type 01) in this "
+              "capture.", file=sys.stderr)
+        return 2
     if args.output:
         # Saved before it is parsed: a layout the parser does not know is
         # still worth keeping for the archive.
@@ -134,10 +142,18 @@ def cmd_manifest(args, profile) -> int:
         package = inspect_package(args.compare)
         differences = installed.compare(config, package)
     if args.json:
+        def module_json(item):
+            entry = {"name": item.name, "size": item.size, "md5": item.md5.hex()}
+            if args.roles:
+                role = roles.describe_module(item.name)
+                entry.update(role=role.role, description=role.description,
+                             module_type=role.module_type, module_index=role.index,
+                             approximate=role.approximate)
+            return entry
+
         result = {"version": str(config.version) if config.version else None,
                   "size": len(config.data), "md5": config.md5.hex(),
-                  "modules": [{"name": item.name, "size": item.size, "md5": item.md5.hex()}
-                              for item in config.modules]}
+                  "modules": [module_json(item) for item in config.modules]}
         if package is not None:
             result["compare"] = {"package": str(package.path), "version": str(package.version),
                                  "matches": not differences, "differences": differences}
@@ -148,7 +164,20 @@ def cmd_manifest(args, profile) -> int:
          + (f", saved to {args.output}" if args.output else ""))
     _say(f"modules   {len(config.modules)}")
     for item in config.modules:
-        _say(_ascii(f"  {item.size:>11} {item.md5.hex()} {item.name}"))
+        line = f"  {item.size:>11} {item.md5.hex()} {item.name}"
+        if args.roles:
+            role = roles.describe_module(item.name)
+            line += f"  {role.role}" + ("  ~" if role.approximate else "")
+        _say(_ascii(line))
+    if args.roles:
+        legend = {}  # keyed on the whole role so variants with the same name both show
+        for item in config.modules:
+            role = roles.describe_module(item.name)
+            legend.setdefault((role.role, role.description, role.approximate), role)
+        _say("roles     ~ = approximate; inferred from the module name, not read from the drone")
+        for role in sorted(legend.values(), key=lambda role: (role.role, role.description)):
+            _say(_ascii(f"  {role.role:<24}{'~ ' if role.approximate else '  '}"
+                        f"{role.description}"))
     if package is None:
         return 0
     if differences:
@@ -202,6 +231,123 @@ def cmd_params(args, profile) -> int:
                     f"[{plain(item.minimum)}..{plain(item.maximum)}]  {item.name}"))
     _say(f"{len(shown)} of {len(items)} parameters shown; * = differs from the default")
     return 0
+
+
+def _plain(number) -> str:
+    return f"{number:g}" if isinstance(number, float) else str(number)
+
+
+def _exact(number) -> str:
+    """Round-trip form for a value that goes into a command the user will run;
+    ``repr`` keeps every significant digit of a float, unlike %g."""
+    return repr(number) if isinstance(number, float) else str(number)
+
+
+def _finite(number):  # JSON has no NaN or infinity
+    return None if isinstance(number, float) and not math.isfinite(number) else number
+
+
+def _setparam_cmd(index: int, value, expected, table: int = 0) -> str:
+    cmd = (f"dji-duml set-param --index {index} --value {_exact(value)} "
+           f"--expected {_exact(expected)} --yes")
+    return cmd + (f" --table {table}" if table else "")
+
+
+def _pick_captured(items: list, args):
+    """One Param from a captured list, by --index or --name."""
+    if args.name is not None:
+        matches = [item for item in items if item.name == args.name]
+        if len(matches) != 1:
+            raise WriteRefused(f"{len(matches)} parameters named {args.name!r} in the capture.")
+        return matches[0]
+    match = next((item for item in items if item.index == args.index), None)
+    if match is None:
+        raise WriteRefused(f"index {args.index} is not among the capture's parameters.")
+    return match
+
+
+def _say_plan(plan, *, note: str, json_out: bool) -> int:
+    param = plan.param
+    if json_out:
+        _say(json.dumps({"index": param.index, "name": param.name, "type": param.type_name,
+                         "old": _finite(plan.old), "new": _finite(plan.new),
+                         "applied": False, "note": note}))
+        return 0
+    _say(_ascii(f"param     {param.index} {param.name} ({param.type_name}) "
+                f"[{_plain(param.minimum)}..{_plain(param.maximum)}]"))
+    _say(_ascii(f"change    {param.shown()} -> {_plain(plan.new)}"))
+    _say(f"note      {note}")
+    return 0
+
+
+def _say_result(result, *, json_out: bool) -> int:
+    param = result.param
+    if json_out:
+        _say(json.dumps({"index": param.index, "name": param.name, "type": param.type_name,
+                         "old": _finite(result.old), "new": _finite(result.new),
+                         "read_back": _finite(result.read_back), "applied": True,
+                         "unlocked": result.unlocked}))
+        return 0
+    _say(_ascii(f"param     {param.index} {param.name} ({param.type_name})"))
+    _say(_ascii(f"written   {_plain(result.old) if result.old is not None else '?'} -> "
+                f"{_plain(result.new)}" + (" (after Assistant Unlock)" if result.unlocked else "")))
+    _say(_ascii(f"readback  {_plain(result.read_back)}: confirmed"))
+    if result.old is not None:
+        _say(_ascii("undo      " + _setparam_cmd(param.index, result.old, result.new, param.table)))
+    else:
+        _say("undo      the old value did not read back; no undo command")
+    return 0
+
+
+def cmd_set_param(args, profile) -> int:
+    table = args.table
+    for flag, value in (("--index", args.index), ("--table", table)):
+        if value is not None and not 0 <= value <= 0xFFFF:  # u16 fields; avoid a struct.error
+            raise WriteRefused(f"{flag} {value} is out of range 0..65535.")
+    if args.capture:
+        if args.yes:
+            raise WriteRefused("--capture is read-only and cannot write; drop --yes.")
+        if table:
+            raise WriteRefused("--capture validates against table 0 only; drop --table.")
+        items = params.from_frames(_capture_frames(args.capture))
+        if not items:
+            print("No flight controller parameters (03/E1) in this capture.", file=sys.stderr)
+            return 2
+        plan = writes.plan_write(_pick_captured(items, args), args.value, args.expected)
+        return _say_plan(plan, note="from capture; read-only", json_out=args.json)
+
+    def scan(done, count):
+        if done % 250 == 0 or done == count:
+            print(f"scanned {done} of {count} indexes", file=sys.stderr, flush=True)
+
+    journal = Journal(args.journal)
+    with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+        if args.name is not None:
+            try:
+                index = params.find(client, args.name, table=table, on_progress=scan)
+            except LookupError as exc:
+                raise WriteRefused(str(exc)) from exc
+        else:
+            index = args.index
+        param = params.read_one(client, index, table=table)
+        if param is None:
+            raise WriteRefused(f"config table {table} has no item at index {index}.")
+        plan = writes.plan_write(param, args.value, args.expected)
+        if not args.yes:
+            return _say_plan(plan, note="dry run; add --yes to write", json_out=args.json)
+        try:
+            result = writes.commit_write(client, plan, table=table,
+                                         unlock_on_reject=not args.no_unlock)
+        except WriteFailed as exc:
+            print(f"WriteFailed: {exc}", file=sys.stderr)
+            if plan.old is not None and exc.read_back is not None:
+                print("restore the previous value with:\n  "
+                      + _setparam_cmd(plan.param.index, plan.old, exc.read_back, plan.param.table),
+                      file=sys.stderr)
+            print("The write did not confirm; verify the drone before trusting it.",
+                  file=sys.stderr)
+            return 4
+    return _say_result(result, json_out=args.json)
 
 
 def _show_package(package) -> None:
@@ -728,9 +874,84 @@ def cmd_fw_check(args, profile) -> int:
     return 2 if remaining else 0
 
 
+def cmd_fw_status(args, profile) -> int:
+    """What the drone runs, measured against the store: whether its exact
+    configuration is held and could be flashed back, and what it can move to.
+    Reads only, like manifest."""
+    data = _installed_config(args, profile)
+    if data is None:
+        print("No complete read of the installed configuration (00/4F type 01) in this "
+              "capture.", file=sys.stderr)
+        return 2
+    drone = installed.describe(data, profile.product_code)
+    sha = hashlib.sha256(data).hexdigest()
+    store = Store.open(args.store)
+    product, current = profile.product_code, drone.version
+    versions = store.versions(product)
+    held = next((config for version in versions for config in version.configs
+                 if config.sha == sha), None)
+    model = store.model()
+    present = {(record["size"], record["md5"]) for record in model.present.values()
+               if record.get("kind") == "module"}
+    missing = [item for item in drone.modules if (item.size, item.md5.hex()) not in present]
+    ready = [version for version in versions if version.complete]
+    damaged = bool(store.lost_index or model.absent or model.unreadable)
+    if held is not None and held.complete:
+        state = "ready"
+    elif held is not None:
+        state = held.state
+    else:
+        state = "not held"
+    if args.json:
+        _say(json.dumps({
+            "store": str(store.root),
+            "store_damaged": damaged,
+            "drone": {"product": product, "version": str(current) if current else None,
+                      "config_sha256": sha, "config_md5": drone.md5.hex(), "size": len(data)},
+            "installed": {"state": state, "modules": len(drone.modules),
+                          "modules_in_store": len(drone.modules) - len(missing),
+                          "missing": [item.name for item in missing]},
+            "ready": [{"version": str(version.version),
+                       "released": version.release.date if version.release else None,
+                       "installed": version.version == current} for version in ready]}))
+        return 0
+    _say(_ascii(f"store     {store.root}"))
+    _damage(store)
+    _say(f"drone     {product} {current or 'unknown version'}, configuration {sha[:12]} "
+         f"(md5 {drone.md5.hex()[:8]}, {_spaced(len(data))} bytes)")
+    if state == "ready":
+        _say("installed ready in the store: the drone can be flashed back to it")
+    elif held is not None:
+        bad = [entry for entry in held.entries if entry.state != "ok"]
+        _say(_ascii(f"installed {state} in the store: {len(bad)} of {len(held.entries)} modules "
+                    "not ready ("
+                    + ", ".join(entry.file.name for entry in bad[:2])
+                    + (", ..." if len(bad) > 2 else "") + f"): fw show {current}"))
+    else:
+        _say(f"installed not in the store; {len(drone.modules) - len(missing)} of its "
+             f"{len(drone.modules)} modules are. Keep its manifest: dji-duml manifest -o FILE, "
+             "then dji-duml fw add FILE")
+    others = [version for version in ready if version.version != current]
+    _say("ready     " + (", ".join(
+        f"{version.version}" + (f" ({version.release.date})" if version.release else "")
+        for version in others) or "no other version"))
+    if state != "ready" and others:
+        _say(f"note      after flashing another version this drone cannot be returned to "
+             f"{current} from the store")
+    if damaged:
+        _say("STORE DAMAGED: dji-duml fw check")
+    elif others:
+        target = _target(store, product, others[0].version) if len(others) == 1 else "<version>"
+        _say(f"next      dji-duml flash --from-store --target {target} "
+             f"--expected-current {current} --yes")
+    else:
+        _say("next      dji-duml fw add <package, capture or folder>")
+    return 0
+
+
 FW_HANDLERS = {"list": cmd_fw_list, "show": cmd_fw_show, "add": cmd_fw_add,
                "harvest": cmd_fw_harvest, "export": cmd_fw_export, "orphans": cmd_fw_orphans,
-               "check": cmd_fw_check}
+               "check": cmd_fw_check, "status": cmd_fw_status}
 
 
 def cmd_fw(args, profile) -> int:
@@ -783,6 +1004,9 @@ def build_parser() -> argparse.ArgumentParser:
     manifest.add_argument("-o", "--output", help="save the .cfg.sig there (a new file)")
     manifest.add_argument("--compare", metavar="PACKAGE",
                           help="exit 0 if the drone runs exactly this package, else 2")
+    manifest.add_argument("--roles", action="store_true",
+                          help="annotate each module with the component it serves (inferred "
+                               "from its name)")
     manifest.add_argument("--json", action="store_true", help="one JSON object")
 
     reader = sub.add_parser(
@@ -791,6 +1015,24 @@ def build_parser() -> argparse.ArgumentParser:
     reader.add_argument("--changed", action="store_true", help="only values off their default")
     reader.add_argument("--name", help="only names containing this text")
     reader.add_argument("--json", action="store_true", help="one JSON list")
+
+    setter = sub.add_parser(
+        "set-param", help="write ONE flight controller parameter (config table 0): validates "
+                          "the value, confirms it by reading back, and prints the undo command")
+    which = setter.add_mutually_exclusive_group(required=True)
+    which.add_argument("--index", type=_number, help="item index, as params prints it")
+    which.add_argument("--name", help="exact parameter name (scans the table to find its index)")
+    setter.add_argument("--value", required=True, help="new value (decimal, or 0x.. for integers)")
+    setter.add_argument("--expected", required=True,
+                        help="the value you believe is set now; checked before any write")
+    setter.add_argument("--table", type=_number, default=0, help="config table (default 0)")
+    setter.add_argument("--yes", action="store_true",
+                        help="actually write; without it this only validates (a dry run)")
+    setter.add_argument("--no-unlock", action="store_true",
+                        help="never send 03/DF Assistant Unlock, even if the write is refused")
+    setter.add_argument("--capture", help="validate against a capture instead of the drone; "
+                                          "read-only, never writes")
+    setter.add_argument("--json", action="store_true", help="one JSON object")
 
     extractor = sub.add_parser(
         "extract", help="recover the files a capture shows being sent to the upgrade center")
@@ -829,6 +1071,10 @@ def build_parser() -> argparse.ArgumentParser:
     exporter.add_argument("-o", "--output", required=True, help="new file outside the store")
     exporter.add_argument("--config", metavar="HEX", help="SHA-256 prefix of one configuration")
     fw_sub.add_parser("orphans", help="modules no held configuration lists")
+    status = fw_sub.add_parser(
+        "status", help="what the drone runs against the store; reads its manifest only")
+    status.add_argument("--capture", help="take the manifest from a capture instead of the drone")
+    status.add_argument("--json", action="store_true", help="one JSON object")
     checker = fw_sub.add_parser("check", help="verify the store")
     checker.add_argument("--full", action="store_true", help="rehash every object")
     checker.add_argument("--fix", action="store_true",
@@ -859,8 +1105,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 HANDLERS = {"scan": cmd_scan, "version": cmd_version, "inspect": cmd_inspect,
             "plan": cmd_plan, "decode": cmd_decode, "manifest": cmd_manifest,
-            "params": cmd_params, "extract": cmd_extract, "pack": cmd_pack,
-            "fw": cmd_fw, "flash": cmd_flash}
+            "params": cmd_params, "set-param": cmd_set_param, "extract": cmd_extract,
+            "pack": cmd_pack, "fw": cmd_fw, "flash": cmd_flash}
 
 
 def main(argv: list[str] | None = None) -> int:
