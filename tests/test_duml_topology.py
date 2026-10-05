@@ -241,6 +241,9 @@ class PassiveTopologyTests(unittest.TestCase):
 
     def test_unknown35_interval_fit_prefers_trapezoid_for_sampled_rate(self):
         topology = Topology(host=0x2A)
+        # Both previous-sample and trapezoidal models are perfectly linear
+        # for this synthetic sequence, but only trapezoid has zero intercept.
+        # The tie-break should therefore prefer the lower-bias physical model.
         raw_values = (0, 10, 20, 30, 40, 50)
         roll_tenths = (0, 25, 100, 225, 400, 625)
         for seq, (roll_raw, raw35) in enumerate(
