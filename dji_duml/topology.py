@@ -1605,6 +1605,21 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                 lines.append(
                                     "       tail-body-rate-corr: " + "  ".join(corr_parts)
                                 )
+                            if tail["body_rate_fits"]:
+                                fit_parts = []
+                                for item in tail["body_rate_fits"][:6]:
+                                    fit_parts.append(
+                                        f"{item['type']}@{item['offset']:02X}"
+                                        f"->{item['signal']} "
+                                        f"lag={item['lag_samples']:+d} "
+                                        f"corr={item['corr']:+.3f} "
+                                        f"scale={item['slope']:+.5f} "
+                                        f"bias={item['intercept']:+.2f} "
+                                        f"rmse={item['rmse']:.2f}"
+                                    )
+                                lines.append(
+                                    "       tail-body-rate-fit: " + "  ".join(fit_parts)
+                                )
                             if tail["counter_candidates"]:
                                 counter_parts = [
                                     f"@{item['offset']:02X}="
