@@ -127,6 +127,9 @@ def cmd_topology(args, profile) -> int:
             # every valid frame is evidence, while journal_rx still prevents
             # per-frame telemetry fsync/logging.
             client.keep = lambda frame: True
+            if args.answer_center:
+                client.responders[(commands.GENERAL, commands.CENTER_INFO)] = commands.CENTER_INFO_REPLY
+                client.responders[(commands.GENERAL, commands.CENTER_STATE)] = commands.CENTER_STATE_REPLY
             deadline = time.monotonic() + args.seconds
             while time.monotonic() < deadline:
                 for frame in client.poll(min(0.1, max(0.0, deadline - time.monotonic()))):
@@ -819,6 +822,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="live: passive observation window (default 2.0)")
     topo.add_argument("--probe", type=_number, action="append",
                       help="live: read-only Version Inquiry to this DUML address; repeatable")
+    topo.add_argument("--answer-center", action="store_true",
+                      help="live: answer M4T 00/81 and 00/82 with captured DJI Assistant replies")
     topo.add_argument("--probe-timeout", type=float, default=0.2,
                       help="live: seconds per explicit Version Inquiry (default 0.2)")
     topo.add_argument("--commands", type=int, default=8,
