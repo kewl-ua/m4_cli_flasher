@@ -135,6 +135,9 @@ def cmd_topology(args, profile) -> int:
                     1.0, address(PC, 0), 0x00, commands.GENERAL,
                     commands.UPGRADE_REPORT, b"\x00",
                 )
+            warmup_deadline = time.monotonic() + args.warmup
+            while time.monotonic() < warmup_deadline:
+                client.poll(min(0.1, max(0.0, warmup_deadline - time.monotonic())))
             deadline = time.monotonic() + args.seconds
             while time.monotonic() < deadline:
                 for frame in client.poll(min(0.1, max(0.0, deadline - time.monotonic()))):
@@ -824,7 +827,9 @@ def build_parser() -> argparse.ArgumentParser:
     topo.add_argument("--endpoint", type=_number, action="append",
                       help="capture: endpoint to keep; repeatable")
     topo.add_argument("--seconds", type=float, default=2.0,
-                      help="live: passive observation window (default 2.0)")
+                      help="live: observation window after warm-up (default 2.0)")
+    topo.add_argument("--warmup", type=float, default=1.0,
+                      help="live: drain USB backlog before measuring (default 1.0)")
     topo.add_argument("--probe", type=_number, action="append",
                       help="live: read-only Version Inquiry to this DUML address; repeatable")
     topo.add_argument("--answer-center", action="store_true",
