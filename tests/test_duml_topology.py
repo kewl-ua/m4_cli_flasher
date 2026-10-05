@@ -71,6 +71,22 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("changed: 0x02", verbose)
         self.assertIn("seq-delta[+1:1,+2:1]", verbose)
 
+    def test_verbose_report_extracts_ascii_and_decodes_osd_prefix(self):
+        payload = bytes.fromhex(
+            "00 00 00 00 00 00 00 00"
+            " 00 00 00 00 00 00 00 00"
+            " 00 00 00 00 00 00 00 00"
+            " fa ff 04 00 aa fc 86 00"
+            " 00 70 80 00"
+        ) + b"RTK_Mobile\x00"
+        topology = Topology(host=0x2A)
+        topology.observe(Frame(0x03, 0x0A, 1, 3, 0x43, payload, ack=0), 1.0)
+        text = report(topology, verbose=True)
+        self.assertIn("ascii: 'RTK_Mobile'", text)
+        self.assertIn("decoded-prefix: h=0.0m", text)
+        self.assertIn("att=(-0.6,0.4,-85.4)deg", text)
+        self.assertIn("state=0x00807000", text)
+
     def test_report_distinguishes_confirmed_and_candidates(self):
         host = address(10, 1)
         fc = address(3, 0)
