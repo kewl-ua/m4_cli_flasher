@@ -550,3 +550,23 @@ the right side at 3.01 / 8.84 deg, followed by left roll/yaw/pitch at
 3.05 / 10.74 deg. This is strong evidence for the left yaw/roll/pitch model,
 while the numerical mount remains a reference calibration until reproduced on
 another airframe.
+
+
+### FLYC 03/43 opaque-tail diagnostics
+
+The verified FLYC 03/43 prefix ends at payload offset 0x23. M4T extends the
+payload to 84 bytes, leaving a 48-byte opaque tail at 0x24..0x53.
+
+Verbose topology reports this tail conservatively without assigning semantic
+names:
+
+- tail-changed: absolute payload offsets that changed during the capture;
+- tail-bytes: byte min/max, unique-count and bit-change mask;
+- tail-u16: aligned little-endian u16/i16 ranges for changing words;
+- tail-corr: strongest absolute Pearson correlations (threshold 0.80) between
+  sliding raw u16/i16 windows and already verified height, velocity and
+  attitude signals.
+
+Correlations are RE hints only. A field is not promoted into the typed decoder
+until its scale, sign, behavior and physical meaning survive controlled
+experiments.
