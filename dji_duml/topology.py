@@ -343,6 +343,72 @@ def _offset_ranges(offsets: set[int]) -> str:
     )
 
 
+
+def _range(values) -> tuple[float, float] | None:
+    values = tuple(values)
+    if not values:
+        return None
+    return min(values), max(values)
+
+
+def _angle_error_degrees(left: float, right: float) -> float:
+    return abs((left - right + 180.0) % 360.0 - 180.0)
+
+
+def _gimbal_window_stats(stream: TrafficStream) -> dict | None:
+    """Aggregate verified and raw 04/05 fields across retained unique payloads."""
+    if stream.cmd_set != 0x04 or stream.cmd_id != 0x05:
+        return None
+
+    from .telemetry import parse_gimbal_params
+
+    decoded = []
+    raw = []
+    for payload in stream._payloads:
+        try:
+            item = parse_gimbal_params(payload)
+        except UnexpectedReply:
+            continue
+        decoded.append(item)
+        if len(payload) >= 24:
+            raw.append((
+                int.from_bytes(payload[0x0C:0x10], "little"),
+                int.from_bytes(payload[0x10:0x14], "little"),
+                int.from_bytes(payload[0x14:0x16], "little", signed=True),
+                int.from_bytes(payload[0x16:0x18], "little", signed=True),
+            ))
+    if not decoded:
+        return None
+
+    pitch = [item.attitude_deg[0] for item in decoded]
+    roll = [item.attitude_deg[1] for item in decoded]
+    yaw = [item.attitude_deg[2] for item in decoded]
+    norms = [
+        item.quaternion_norm for item in decoded
+        if item.quaternion_norm is not None
+    ]
+    errors = [[], [], []]
+    for item in decoded:
+        if item.quaternion_euler_deg is None:
+            continue
+        for axis, (legacy, quat) in enumerate(zip(item.attitude_deg, item.quaternion_euler_deg)):
+            errors[axis].append(_angle_error_degrees(legacy, quat))
+
+    result = {
+        "attitude_ranges": (_range(pitch), _range(roll), _range(yaw)),
+        "quaternion_norm_range": _range(norms),
+        "quaternion_max_error": tuple(max(axis) if axis else None for axis in errors),
+    }
+    if raw:
+        result["raw_ranges"] = (
+            _range(row[0] for row in raw),
+            _range(row[1] for row in raw),
+            _range(row[2] for row in raw),
+            _range(row[3] for row in raw),
+        )
+    return result
+
+
 def report(topology: Topology, *, commands_per_module: int = 8,
            verbose: bool = False) -> str:
     """Human-readable topology report; verbose adds per-stream fingerprints."""
@@ -453,6 +519,31 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                             )
                         line += f" opaque={len(gimbal.middle) + len(gimbal.tail)}B"
                         lines.append(line)
+                        stats = _gimbal_window_stats(stream)
+                        if stats is not None:
+                            att_ranges = stats["attitude_ranges"]
+                            labels = ("pitch", "roll", "yaw")
+                            parts = []
+                            for label, value in zip(labels, att_ranges):
+                                if value is not None:
+                                    parts.append(f"{label}={value[0]:.1f}..{value[1]:.1f}")
+                            if parts:
+                                lines.append("       window-att: " + "  ".join(parts) + " deg")
+                            qnorm = stats["quaternion_norm_range"]
+                            qerr = stats["quaternion_max_error"]
+                            if qnorm is not None:
+                                lines.append(
+                                    f"       q-check: |q|={qnorm[0]:.6f}..{qnorm[1]:.6f} "
+                                    f"max-error=({qerr[0]:.3f},{qerr[1]:.3f},{qerr[2]:.3f})deg"
+                                )
+                            raw_ranges = stats.get("raw_ranges")
+                            if raw_ranges is not None:
+                                raw_names = ("u32@0C", "u32@10", "i16@14", "i16@16")
+                                raw_parts = []
+                                for name, value in zip(raw_names, raw_ranges):
+                                    if value is not None:
+                                        raw_parts.append(f"{name}={int(value[0])}..{int(value[1])}")
+                                lines.append("       opaque-window: " + "  ".join(raw_parts))
                 lines.append(
                     f"       changed: {_offset_ranges(stream.changed_offsets)}"
                     + (" (length varies)" if stream.payload_length_changed else "")
