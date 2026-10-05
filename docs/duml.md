@@ -440,10 +440,11 @@ fields in the 49-byte GIMBAL 04/05 push:
 - 0x00..0x05: legacy pitch/roll/yaw, signed int16, 0.1 degree.
 - 0x08..0x09: signed relative yaw, 0.1 degree.
 - 0x0C..0x0F: monotonic timestamp in milliseconds.
-- 0x10..0x11: signed yaw reference, 0.01 degree. reference + relative yaw
-  predicts packet yaw with sub-degree median error in controlled captures.
-- 0x14..0x15: secondary pitch/joint angle, signed int16, 0.1 degree. It tracks
-  packet pitch with ~1.0 correlation in large-range pitch motion.
+- 0x10..0x11: signed internal yaw-reference candidate, 0.01 degree. A body-yaw
+  rotation test disproved the simple interpretation "this is FC/body yaw".
+- 0x14..0x15: secondary pitch/joint angle, signed int16, 0.1 degree. With the
+  airframe stationary it tracks packet pitch; when the whole airframe moves,
+  the useful model is body-relative and must be checked against FC pitch.
 - 0x18..0x27: float32 quaternion w,x,y,z, unit norm.
 
 The fields at 0x12..0x13, 0x16..0x17 and 0x28..end remain unnamed. At high
@@ -454,14 +455,12 @@ measurements in all dynamic conditions.
 
 ### FC / Gimbal yaw cross-check
 
-Verbose topology correlates FLYC 03/43 yaw with the nearest GIMBAL 04/05
-sample in host receive time. The final cross-yaw block reports the pair timing
-skew, unwrapped correlations and the angular error between FC yaw and the M4T
-gimbal yaw-reference field at 0x10.
+Verbose topology pairs FLYC 03/43 and GIMBAL 04/05 by nearest host receive
+time. The final cross-attitude block tests body-relative models directly:
+joint@14 against gimbal_pitch - FC_pitch, ext@16 against gimbal_roll - FC_roll,
+and relative@08 against gimbal_yaw - FC_yaw. Field 0x10 is reported separately
+as an internal yaw-reference candidate and is not assumed to be body yaw.
 
-A useful controlled experiment is to keep the gimbal fixed relative to the
-airframe and rotate the whole aircraft around yaw. If 0x10 is the body/FC yaw
-reference, FC yaw and ref@10 should move together while relative@08 remains
-nearly constant. If the gimbal stabilizes in world coordinates instead, the
-same report will show that behavior via gimbal/relative yaw instead of forcing
-a semantic conclusion.
+This pairing is intentionally empirical: low timing skew is reported alongside
+correlations and median/max angular error, so a field is promoted only when the
+model survives controlled airframe and gimbal motion.
