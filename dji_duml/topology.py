@@ -156,6 +156,45 @@ def from_frames(frames: Iterable[Frame], *, host: int | None = None) -> Topology
     return Topology(host=host).extend(frames)
 
 
+def from_capture(path, *, host: int | None = None, device: int | None = None,
+                 endpoints: set[int] | None = None) -> Topology:
+    """Build topology directly from a USBPcap/pcapng capture."""
+    from . import pcap
+    return from_frames(
+        (entry.frame for entry in pcap.iter_frames(path, device=device, endpoints=endpoints)),
+        host=host,
+    )
+
+
+def report(topology: Topology, *, commands_per_module: int = 8) -> str:
+    """Compact human-readable topology report for captures and live probes."""
+    lines = [f"DUML topology: {topology.frames} frames, "
+             f"{len(topology.confirmed)} confirmed, {len(topology.candidates)} candidates"]
+
+    def command_text(node: Module) -> str:
+        most = node.commands_sent.most_common(max(0, commands_per_module))
+        return ", ".join(f"{s:02X}/{i:02X} x{count}" for (s, i), count in most) or "-"
+
+    for node in topology.confirmed:
+        version = ""
+        if node.version is not None:
+            version = f"  fw={node.version.firmware} hw={node.version.hardware!r}"
+        source = "active+passive" if node.active_probe and node.sent else (
+            "active" if node.active_probe else "passive")
+        lines.append(
+            f"+ 0x{node.address:02X}  {node.type_name} idx={node.index}  "
+            f"{source}  tx={node.sent} rx={node.received}{version}"
+        )
+        lines.append(f"    commands: {command_text(node)}")
+
+    for node in topology.candidates:
+        lines.append(
+            f"? 0x{node.address:02X}  {node.type_name} idx={node.index}  "
+            f"receiver-only  rx={node.received}"
+        )
+    return "\n".join(lines)
+
+
 def addresses(device_types: Iterable[int], indexes: Iterable[int] = (0,)) -> tuple[int, ...]:
     """Build an explicit probe address list without scanning implicitly."""
     result = []
