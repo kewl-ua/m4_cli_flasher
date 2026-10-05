@@ -125,9 +125,23 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("q-check: |q|=", text)
         self.assertIn("clock@0C:", text)
         self.assertIn("u32@0C=9946868..10385769", text)
-        self.assertIn("u32@10=56849..56851", text)
+        self.assertIn("i16@10=-8687..-8685", text)
+        self.assertIn("i16@12=0..0", text)
         self.assertIn("i16@14=-5..4", text)
         self.assertIn("i16@16=-5..15", text)
+        self.assertIn("yaw-model:", text)
+
+    def test_gimbal_angle_correlation_finds_pitch_encoder(self):
+        topology = Topology(host=0x2A)
+        for seq, pitch_tenths in enumerate((-300, -100, 0, 200, 500), 1):
+            payload = bytearray(24)
+            payload[0:2] = int(pitch_tenths).to_bytes(2, "little", signed=True)
+            payload[20:22] = int(pitch_tenths - 5).to_bytes(2, "little", signed=True)
+            topology.observe(Frame(0x04, 0x2A, seq, 4, 5, bytes(payload), ack=0),
+                             seq * 0.1)
+        text = report(topology, verbose=True)
+        self.assertIn("angle-corr:", text)
+        self.assertIn("i16@14/10[pitch=+1.000", text)
 
     def test_gimbal_rate_correlation_uses_device_timestamp(self):
         topology = Topology(host=0x2A)
