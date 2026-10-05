@@ -92,6 +92,30 @@ def get_version(client: DumlClient, target: int, *, timeout: float = 2.0,
     return parse_version_reply(reply.payload)
 
 
+GET_SERIAL = 0x51
+
+
+def parse_serial(payload: bytes) -> str | None:
+    """The hardware serial a 00/51 reply carries: ``status u8 | 6 header bytes
+    | ASCII serial`` (seen as 20 chars at offset 7). None when the module
+    answers without one (e.g. a one-byte status). The serial is a device
+    identifier -- callers must NOT publish it."""
+    if len(payload) < 8 or payload[0] != 0:
+        return None
+    text = bytes(payload[7:]).split(b"\x00", 1)[0]
+    if not text or not all(0x20 <= byte < 0x7F for byte in text):
+        return None
+    return text.decode("ascii")
+
+
+def get_serial(client: DumlClient, target: int, *, timeout: float = 1.0,
+               retries: int = 1) -> str | None:
+    """Read a module's 00/51 serial (``None`` if it answers without one).
+    Read-only, so it is retried. The value is sensitive; do not publish it."""
+    reply = client.request(target, GENERAL, GET_SERIAL, b"\x01", timeout=timeout, retries=retries)
+    return parse_serial(reply.payload)
+
+
 def parse_device_info(payload: bytes) -> str:
     """The device-info string a 00/FF reply carries: product, then a
     timestamp-like field, e.g. ``NAVI wa345 <YYYYMMDD>|<HHMMSS>``. Two M4Ts on

@@ -16,8 +16,8 @@ from pathlib import Path
 from . import battery, commands, installed, params, pcap, roles, writes
 from .client import DumlClient
 from .errors import (
-    DumlError, FlashAborted, FlashFailed, FlashOutcomeUnknown, FlashRefused,
-    WriteFailed, WriteRefused,
+    CommandRejected, DumlError, FlashAborted, FlashFailed, FlashOutcomeUnknown,
+    FlashRefused, NoReply, UnexpectedReply, WriteFailed, WriteRefused,
 )
 from .display import ProgressView
 from .extract import REPORT, extract
@@ -387,6 +387,107 @@ def cmd_battery(args, profile) -> int:
     _say(f"temp      {data.temperature:.1f} C")
     _say(f"status    0x{data.status:016x}" + ("  (healthy)" if data.status == 0 else ""))
     _say(_ascii(f"tail      {data.tail.hex()}  (undecoded; may identify the pack - don't publish)"))
+    return 0
+
+
+#: Curated M4T module addresses for `probe` (raw DUML type|index<<5). Not a
+#: blind sweep: only modules we have reason to expect. Perception (type 24)
+#: and the laser are included to confirm empirically that they do NOT answer.
+PROBE_ADDRESSES = [0x03, 0x04, 0x0B, 0x11, 0x1A, 0x28, 0x48, 0x68, 0x92, 0xA9, 0x1F,
+                   0x18, 0x38, 0x58, 0x78, 0xB8]
+
+
+def _probe_role(addr: int) -> str:
+    return roles.DEVICE_TYPES.get(addr & 0x1F, f"type {addr & 0x1F}")
+
+
+def _probe_fill(info: dict, version, want_serial: bool) -> None:
+    """Store the firmware (non-sensitive) always; the hardware string may be a
+    serial on some modules (the FC's is), so keep it behind --serial."""
+    info["firmware"] = str(version.firmware)
+    if want_serial:
+        info["hardware"] = version.hardware
+
+
+def _probe_live(client, addr: int, want_serial: bool, timeout: float) -> dict | None:
+    info: dict = {}
+    try:  # discovery: no retry -- a module either answers or it does not
+        _probe_fill(info, commands.get_version(client, addr, timeout=timeout, retries=0),
+                    want_serial)
+    except NoReply:
+        return None
+    except (UnexpectedReply, CommandRejected):
+        info["responds"] = True
+    if want_serial:
+        try:
+            info["serial"] = commands.get_serial(client, addr, timeout=timeout, retries=0)
+        except (NoReply, UnexpectedReply, CommandRejected):
+            info["serial"] = None
+    return info
+
+
+def _probe_capture(path, want_serial: bool) -> dict:
+    found: dict[int, dict] = {}
+    for frame in _capture_frames(path):
+        if not frame.response or frame.cmd_set != commands.GENERAL:
+            continue
+        if frame.cmd_id == commands.VERSION_INQUIRY:
+            entry = found.setdefault(frame.sender, {})
+            try:
+                _probe_fill(entry, commands.parse_version_reply(frame.payload), want_serial)
+            except (UnexpectedReply, CommandRejected):
+                entry.setdefault("responds", True)
+        elif want_serial and frame.cmd_id == commands.GET_SERIAL:
+            found.setdefault(frame.sender, {})["serial"] = commands.parse_serial(frame.payload)
+    return found
+
+
+def cmd_probe(args, profile) -> int:
+    """Read-only module discovery: Version Inquiry (00/01), optionally the
+    serial (00/51), to a curated address list. Sends nothing that changes
+    anything. Serials are device identifiers and are not published."""
+    if args.capture:
+        found = _probe_capture(args.capture, args.read_serial)
+        rows = [(addr, found[addr]) for addr in sorted(found)]
+    else:
+        addrs = args.address or PROBE_ADDRESSES
+        journal = Journal(args.journal)
+        with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+            rows = [(addr, _probe_live(client, addr, args.read_serial, args.timeout))
+                    for addr in addrs]
+    if args.json:
+        out = []
+        for addr, info in rows:
+            entry = {"address": format_address(addr).replace(" ", ""),
+                     "type": addr & 0x1F, "role": _probe_role(addr), "responds": info is not None}
+            if info is not None:
+                entry["firmware"] = info.get("firmware")
+                if args.read_serial:
+                    entry["hardware"] = info.get("hardware")  # may be a serial
+                    entry["serial"] = info.get("serial")
+            out.append(entry)
+        _say(json.dumps(out))
+        return 0
+    sensitive = False
+    for addr, info in rows:
+        role = _probe_role(addr)
+        if info is None:
+            _say(_ascii(f"{format_address(addr):7} {role:<20} -- no response"))
+            continue
+        detail = f"fw {info['firmware']}" if "firmware" in info else "responds"
+        if args.read_serial:
+            if info.get("hardware"):
+                detail += f"   hw {info['hardware']}"
+                sensitive = True
+            serial = info.get("serial")
+            detail += f"   serial {serial}" if serial else "   (no serial)"
+            sensitive = sensitive or bool(serial)
+        _say(_ascii(f"{format_address(addr):7} {role:<20} {detail}"))
+    responded = sum(1 for _, info in rows if info is not None)
+    _say(f"{responded} of {len(rows)} responded" if not args.capture
+         else f"{responded} module(s) seen in the capture")
+    if sensitive:
+        _say("note: hardware/serial strings are device identifiers - do not publish them")
     return 0
 
 
@@ -1080,6 +1181,18 @@ def build_parser() -> argparse.ArgumentParser:
     batt.add_argument("--capture", help="take it from a capture instead of the drone")
     batt.add_argument("--json", action="store_true", help="one JSON object")
 
+    prober = sub.add_parser(
+        "probe", help="read-only module discovery: which addresses answer Version Inquiry "
+                      "(and, with --serial, their serial); sends nothing that changes anything")
+    prober.add_argument("--address", type=_number, action="append", metavar="ADDR",
+                        help="DUML address to probe, e.g. 0x92; repeatable (default: known M4T modules)")
+    prober.add_argument("--serial", action="store_true", dest="read_serial",
+                        help="also read 00/51 serial of responders (device IDs; do not publish)")
+    prober.add_argument("--timeout", type=float, default=0.8,
+                        help="seconds to wait for each address (default 0.8; no retry)")
+    prober.add_argument("--capture", help="discover from a capture instead of the drone")
+    prober.add_argument("--json", action="store_true", help="one JSON list")
+
     extractor = sub.add_parser(
         "extract", help="recover the files a capture shows being sent to the upgrade center")
     extractor.add_argument("capture", help="pcap or pcapng, USBPcap or usbmon")
@@ -1152,7 +1265,8 @@ def build_parser() -> argparse.ArgumentParser:
 HANDLERS = {"scan": cmd_scan, "version": cmd_version, "inspect": cmd_inspect,
             "plan": cmd_plan, "decode": cmd_decode, "manifest": cmd_manifest,
             "params": cmd_params, "set-param": cmd_set_param, "battery": cmd_battery,
-            "extract": cmd_extract, "pack": cmd_pack, "fw": cmd_fw, "flash": cmd_flash}
+            "probe": cmd_probe, "extract": cmd_extract, "pack": cmd_pack, "fw": cmd_fw,
+            "flash": cmd_flash}
 
 
 def main(argv: list[str] | None = None) -> int:
