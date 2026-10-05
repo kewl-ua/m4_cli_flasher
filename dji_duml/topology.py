@@ -1,4 +1,4 @@
-"""DUML bus topology discovery.
+"""DUML bus topology discovery and passive traffic fingerprinting.
 
 Passive discovery is deliberately conservative: a module is confirmed when
 it has actually transmitted a valid DUML frame. An address that only appears
@@ -17,6 +17,8 @@ from .commands import GENERAL, VERSION_INQUIRY, VersionInfo, parse_version_reply
 from .errors import NoReply, UnexpectedReply
 from .frame import Frame, address
 
+# Names from the public legacy DUML v1 table. They describe the encoded type,
+# not necessarily the physical role of the same address on newer products.
 DEVICE_TYPES = {
     0: "Invalid/Any", 1: "Camera", 2: "App", 3: "Flight Controller",
     4: "Gimbal", 5: "Center Board", 6: "Remote Control", 7: "Wi-Fi Air",
@@ -28,6 +30,89 @@ DEVICE_TYPES = {
     25: "IMU", 26: "GPS/RTK", 27: "Wi-Fi Ground", 28: "Signal Converter",
     29: "PMU", 30: "Unknown", 31: "Last/Unknown",
 }
+
+MAX_UNIQUE_PAYLOADS = 4096
+
+
+@dataclass
+class TrafficStream:
+    """Aggregate one sender -> receiver / command / direction stream."""
+
+    sender: int
+    receiver: int
+    cmd_set: int
+    cmd_id: int
+    response: bool
+    count: int = 0
+    first_seen: float | None = None
+    last_seen: float | None = None
+    payload_min: int | None = None
+    payload_max: int | None = None
+    _payloads: set[bytes] = field(default_factory=set, repr=False)
+    payloads_capped: bool = False
+    _previous_seq: int | None = field(default=None, repr=False)
+    seq_steps: Counter[str] = field(default_factory=Counter)
+
+    def observe(self, frame: Frame, timestamp: float | None) -> None:
+        self.count += 1
+        if timestamp is not None:
+            if self.first_seen is None:
+                self.first_seen = timestamp
+            self.last_seen = timestamp
+
+        size = len(frame.payload)
+        self.payload_min = size if self.payload_min is None else min(self.payload_min, size)
+        self.payload_max = size if self.payload_max is None else max(self.payload_max, size)
+
+        payload = bytes(frame.payload)
+        if payload not in self._payloads:
+            if len(self._payloads) < MAX_UNIQUE_PAYLOADS:
+                self._payloads.add(payload)
+            else:
+                self.payloads_capped = True
+
+        if self._previous_seq is not None:
+            delta = (frame.seq - self._previous_seq) & 0xFFFF
+            if delta == 1:
+                self.seq_steps["+1"] += 1
+            elif delta == 0:
+                self.seq_steps["same"] += 1
+            else:
+                self.seq_steps["other"] += 1
+        self._previous_seq = frame.seq
+
+    @property
+    def unique_payloads(self) -> int:
+        return len(self._payloads)
+
+    @property
+    def duration(self) -> float | None:
+        if self.first_seen is None or self.last_seen is None:
+            return None
+        return max(0.0, self.last_seen - self.first_seen)
+
+    @property
+    def rate_hz(self) -> float | None:
+        duration = self.duration
+        if duration is None or duration <= 0 or self.count < 2:
+            return None
+        return (self.count - 1) / duration
+
+    def as_dict(self) -> dict:
+        return {
+            "sender": self.sender,
+            "receiver": self.receiver,
+            "cmd_set": self.cmd_set,
+            "cmd_id": self.cmd_id,
+            "response": self.response,
+            "count": self.count,
+            "rate_hz": self.rate_hz,
+            "duration": self.duration,
+            "payload_len": {"min": self.payload_min, "max": self.payload_max},
+            "unique_payloads": self.unique_payloads,
+            "unique_payloads_exact": not self.payloads_capped,
+            "seq_steps": dict(self.seq_steps),
+        }
 
 
 @dataclass
@@ -65,19 +150,16 @@ class Module:
     def candidate(self) -> bool:
         return not self.confirmed and self.received > 0
 
-    @property
-    def label(self) -> str:
-        return f"{self.type_name} {self.device_type:02d}:{self.index}"
-
 
 class Topology:
-    """Observed DUML address graph."""
+    """Observed DUML address graph plus bounded stream fingerprints."""
 
     def __init__(self, *, host: int | None = None,
                  roles: dict[int, str] | None = None):
         self.host = host
         self.roles = dict(roles or {})
         self.nodes: dict[int, Module] = {}
+        self.streams: dict[tuple[int, int, int, int, bool], TrafficStream] = {}
         self.frames = 0
 
     def module(self, value: int) -> Module:
@@ -88,7 +170,7 @@ class Topology:
             node = self.nodes[value] = Module(value)
         return node
 
-    def observe(self, frame: Frame) -> None:
+    def observe(self, frame: Frame, timestamp: float | None = None) -> None:
         source = self.module(frame.sender)
         target = self.module(frame.receiver)
         source.sent += 1
@@ -99,6 +181,12 @@ class Topology:
             source.responses_sent += 1
         else:
             source.requests_sent += 1
+
+        key = (frame.sender, frame.receiver, frame.cmd_set, frame.cmd_id, frame.response)
+        stream = self.streams.get(key)
+        if stream is None:
+            stream = self.streams[key] = TrafficStream(*key)
+        stream.observe(frame, timestamp)
         self.frames += 1
 
     def extend(self, frames: Iterable[Frame]) -> "Topology":
@@ -116,42 +204,50 @@ class Topology:
         return tuple(node for node in self._ordered()
                      if node.candidate and node.address != self.host)
 
+    def streams_from(self, sender: int) -> tuple[TrafficStream, ...]:
+        return tuple(sorted(
+            (stream for stream in self.streams.values() if stream.sender == sender),
+            key=lambda stream: (-stream.count, stream.receiver, stream.cmd_set,
+                                stream.cmd_id, stream.response),
+        ))
+
     def _ordered(self) -> list[Module]:
         return [self.nodes[key] for key in sorted(self.nodes)]
 
-    def as_dict(self) -> dict:
-        def item(node: Module) -> dict:
-            result = {
-                "address": node.address,
-                "type": node.device_type,
-                "index": node.index,
-                "name": node.type_name,
-                "role": self.roles.get(node.address),
-                "confirmed": node.confirmed,
-                "sent": node.sent,
-                "received": node.received,
-                "requests_sent": node.requests_sent,
-                "responses_sent": node.responses_sent,
-                "commands_sent": {
-                    f"{cmd_set:02x}/{cmd_id:02x}": count
-                    for (cmd_set, cmd_id), count in sorted(node.commands_sent.items())
-                },
+    def _module_dict(self, node: Module) -> dict:
+        result = {
+            "address": node.address,
+            "type": node.device_type,
+            "index": node.index,
+            "legacy_type_name": node.type_name,
+            "role": self.roles.get(node.address),
+            "confirmed": node.confirmed,
+            "sent": node.sent,
+            "received": node.received,
+            "requests_sent": node.requests_sent,
+            "responses_sent": node.responses_sent,
+            "commands_sent": {
+                f"{cmd_set:02x}/{cmd_id:02x}": count
+                for (cmd_set, cmd_id), count in sorted(node.commands_sent.items())
+            },
+            "streams": [stream.as_dict() for stream in self.streams_from(node.address)],
+        }
+        if node.version is not None:
+            result["version"] = {
+                "hardware": node.version.hardware,
+                "loader": str(node.version.loader),
+                "firmware": str(node.version.firmware),
             }
-            if node.version is not None:
-                result["version"] = {
-                    "hardware": node.version.hardware,
-                    "loader": str(node.version.loader),
-                    "firmware": str(node.version.firmware),
-                }
-            if node.version_error is not None:
-                result["version_error"] = node.version_error
-            return result
+        if node.version_error is not None:
+            result["version_error"] = node.version_error
+        return result
 
+    def as_dict(self) -> dict:
         return {
             "frames": self.frames,
             "host": self.host,
-            "confirmed": [item(node) for node in self.confirmed],
-            "candidates": [item(node) for node in self.candidates],
+            "confirmed": [self._module_dict(node) for node in self.confirmed],
+            "candidates": [self._module_dict(node) for node in self.candidates],
         }
 
 
@@ -163,16 +259,24 @@ def from_frames(frames: Iterable[Frame], *, host: int | None = None,
 def from_capture(path, *, host: int | None = None, device: int | None = None,
                  endpoints: set[int] | None = None,
                  roles: dict[int, str] | None = None) -> Topology:
-    """Build topology directly from a USBPcap/pcapng capture."""
+    """Build topology directly from a USBPcap/pcapng capture with timestamps."""
     from . import pcap
-    return from_frames(
-        (entry.frame for entry in pcap.iter_frames(path, device=device, endpoints=endpoints)),
-        host=host, roles=roles,
-    )
+
+    topology = Topology(host=host, roles=roles)
+    for entry in pcap.iter_frames(path, device=device, endpoints=endpoints):
+        topology.observe(entry.frame, entry.time)
+    return topology
 
 
-def report(topology: Topology, *, commands_per_module: int = 8) -> str:
-    """Compact human-readable topology report for captures and live probes."""
+def _label(topology: Topology, node: Module) -> str:
+    legacy = f"type={node.device_type} legacy:{node.type_name}"
+    role = topology.roles.get(node.address)
+    return f"{role} [{legacy}]" if role else legacy
+
+
+def report(topology: Topology, *, commands_per_module: int = 8,
+           verbose: bool = False) -> str:
+    """Human-readable topology report; verbose adds per-stream fingerprints."""
     lines = [f"DUML topology: {topology.frames} frames, "
              f"{len(topology.confirmed)} confirmed, {len(topology.candidates)} candidates"]
 
@@ -186,19 +290,36 @@ def report(topology: Topology, *, commands_per_module: int = 8) -> str:
             version = f"  fw={node.version.firmware} hw={node.version.hardware!r}"
         source = "active+passive" if node.active_probe and node.sent else (
             "active" if node.active_probe else "passive")
-        role = topology.roles.get(node.address)
-        label = f"{role} [{node.type_name}]" if role else node.type_name
         lines.append(
-            f"+ 0x{node.address:02X}  {label} idx={node.index}  "
+            f"+ 0x{node.address:02X}  {_label(topology, node)} idx={node.index}  "
             f"{source}  tx={node.sent} rx={node.received}{version}"
         )
         lines.append(f"    commands: {command_text(node)}")
+        if verbose:
+            for stream in topology.streams_from(node.address):
+                rate = f"{stream.rate_hz:.1f} Hz" if stream.rate_hz is not None else "rate=?"
+                if stream.payload_min == stream.payload_max:
+                    payload = f"len={stream.payload_min}"
+                else:
+                    payload = f"len={stream.payload_min}..{stream.payload_max}"
+                unique = (
+                    f"unique={stream.unique_payloads}"
+                    if not stream.payloads_capped
+                    else f"unique>={stream.unique_payloads}"
+                )
+                seq = "/".join(
+                    f"{name}:{stream.seq_steps.get(name, 0)}"
+                    for name in ("+1", "same", "other")
+                )
+                kind = "response" if stream.response else "request/push"
+                lines.append(
+                    f"    -> 0x{stream.receiver:02X}  {stream.cmd_set:02X}/{stream.cmd_id:02X}  "
+                    f"{kind}  n={stream.count}  {rate}  {payload}  {unique}  seq[{seq}]"
+                )
 
     for node in topology.candidates:
-        role = topology.roles.get(node.address)
-        label = f"{role} [{node.type_name}]" if role else node.type_name
         lines.append(
-            f"? 0x{node.address:02X}  {label} idx={node.index}  "
+            f"? 0x{node.address:02X}  {_label(topology, node)} idx={node.index}  "
             f"receiver-only  rx={node.received}"
         )
     return "\n".join(lines)
