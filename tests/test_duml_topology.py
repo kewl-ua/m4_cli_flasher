@@ -320,6 +320,43 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("best-mount: side=left order=yaw*roll*pitch", text)
 
 
+    def test_cross_attitude_skips_insufficient_excitation(self):
+        topology = Topology(host=0x2A)
+        fc_payload = struct.pack(
+            "<ddhhhhhhhBBI",
+            0.0, 0.0,
+            0, 0, 0, 0,
+            10, 20, -800,
+            0, 0, 0,
+        )
+        gimbal_payload = (
+            struct.pack(
+                "<hhhBbHBBIhhhh",
+                0, 0, -800,
+                0x82, 0,
+                0,
+                0, 1,
+                1000,
+                0, 0, 0, 0,
+            )
+            + struct.pack("<4f", *euler_deg_to_quaternion((0.0, 0.0, -80.0)))
+            + bytes(9)
+        )
+        for seq in range(1, 6):
+            topology.observe(
+                Frame(0x03, 0x0A, seq, 0x03, 0x43, fc_payload, ack=0),
+                seq * 0.5,
+            )
+            topology.observe(
+                Frame(0x04, 0x2A, seq, 0x04, 0x05, gimbal_payload, ack=0),
+                seq * 0.5 + 0.1,
+            )
+
+        text = report(topology, verbose=True)
+        self.assertIn("cross-attitude: skipped kinematic fit", text)
+        self.assertIn("insufficient excitation", text)
+        self.assertNotIn("best-mount:", text)
+
     def test_report_distinguishes_confirmed_and_candidates(self):
         host = address(10, 1)
         fc = address(3, 0)
