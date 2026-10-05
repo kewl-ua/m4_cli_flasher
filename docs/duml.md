@@ -622,3 +622,18 @@ observations:
 Verbose topology now reports counter-like frequency estimates, categorical
 state summaries, and angular-acceleration correlations to guide the next
 single-axis experiments.
+
+
+### Quaternion-derived FC body-rate diagnostics
+
+Euler-component derivatives are not reliable body angular rates when multiple
+attitude axes are excited or the trajectory approaches Euler singularities.
+Verbose FLYC tail diagnostics therefore also compute:
+
+    q_delta = inverse(q_prev) * q_current
+
+and convert that shortest delta quaternion to a rotation vector divided by host
+receive-time delta. Raw sliding u16/i16 tail windows are correlated against
+omega_x, omega_y, omega_z and omega magnitude. These are still RE hints because
+03/43 has no verified device timestamp and arrives at only about 2 Hz, but they
+avoid the axis-coupling error of naive Euler differentiation.
