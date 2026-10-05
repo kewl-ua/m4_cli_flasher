@@ -310,6 +310,20 @@ def _label(topology: Topology, node: Module) -> str:
     return f"{role} [{legacy}]" if role else legacy
 
 
+def _ascii_runs(data: bytes, *, minimum: int = 4) -> tuple[str, ...]:
+    runs = []
+    start = None
+    for index, value in enumerate(data + b"\x00"):
+        printable = 0x20 <= value < 0x7F
+        if printable and start is None:
+            start = index
+        elif not printable and start is not None:
+            if index - start >= minimum:
+                runs.append(data[start:index].decode("ascii"))
+            start = None
+    return tuple(runs)
+
+
 def _offset_ranges(offsets: set[int]) -> str:
     if not offsets:
         return "-"
@@ -396,6 +410,25 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                 lines.append(
                     f"       sample: {sample or '-'}"
                 )
+                ascii_text = _ascii_runs(stream.sample_payload)
+                if ascii_text:
+                    lines.append("       ascii: " + ", ".join(repr(text) for text in ascii_text))
+                if stream.cmd_set == 0x03 and stream.cmd_id == 0x43:
+                    from .telemetry import parse_flyc_osd_general
+                    try:
+                        osd = parse_flyc_osd_general(stream.sample_payload)
+                    except UnexpectedReply:
+                        pass
+                    else:
+                        vx, vy, vz = osd.velocity_mps
+                        pitch, roll, yaw = osd.attitude_deg
+                        lines.append(
+                            f"       decoded-prefix: h={osd.relative_height_m:.1f}m "
+                            f"v=({vx:.1f},{vy:.1f},{vz:.1f})m/s "
+                            f"att=({pitch:.1f},{roll:.1f},{yaw:.1f})deg "
+                            f"ctrl=0x{osd.ctrl_info:02X} state=0x{osd.controller_state:08X} "
+                            f"tail={len(osd.tail)}B"
+                        )
                 lines.append(
                     f"       changed: {_offset_ranges(stream.changed_offsets)}"
                     + (" (length varies)" if stream.payload_length_changed else "")
