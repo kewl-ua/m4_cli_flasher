@@ -127,6 +127,10 @@ class PassiveTopologyTests(unittest.TestCase):
                 2, "little", signed=True
             )
             payload[0x33] = 0x10 if seq % 2 else 0x00
+            payload[0x35:0x37] = int(pitch_tenths).to_bytes(
+                2, "little", signed=True
+            )
+            payload[0x37] = seq
             topology.observe(
                 Frame(0x03, 0x0A, seq, 0x03, 0x43, bytes(payload), ack=0),
                 seq * 0.5,
@@ -137,7 +141,43 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("0x28-0x29", text)
         self.assertIn("@33=00..10", text)
         self.assertIn("mask10", text)
+        self.assertIn("legacy-layout@24..36=", text)
+        self.assertIn("m4t-extension@37..53=0x37", text)
+        self.assertIn("unknown35?@35=", text)
         self.assertIn("i16@28->pitch=+1.000", text)
+        self.assertIn("i16@35->pitch=+1.000", text)
+
+    def test_flyc_tail_rate_correlation_finds_odd_offset_word(self):
+        topology = Topology(host=0x2A)
+        rows = (
+            (0, 0),
+            (10, 20),
+            (30, 40),
+            (60, 60),
+            (100, 80),
+        )
+        for seq, (pitch_tenths, rate_raw) in enumerate(rows, 1):
+            payload = bytearray(84)
+            struct.pack_into(
+                "<ddhhhhhhhBBI",
+                payload,
+                0,
+                0.0, 0.0,
+                0, 0, 0, 0,
+                pitch_tenths, 0, 0,
+                0, 0, 0,
+            )
+            payload[0x35:0x37] = int(rate_raw).to_bytes(
+                2, "little", signed=True
+            )
+            topology.observe(
+                Frame(0x03, 0x0A, seq, 0x03, 0x43, bytes(payload), ack=0),
+                seq * 0.5,
+            )
+
+        text = report(topology, verbose=True)
+        self.assertIn("tail-rate-corr:", text)
+        self.assertIn("i16@35->pitch_rate=+1.000", text)
 
     def test_gimbal_window_stats_cover_controlled_motion(self):
         stationary = bytes.fromhex(
