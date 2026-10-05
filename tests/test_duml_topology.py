@@ -130,7 +130,6 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("i16@12=0..0", text)
         self.assertIn("i16@14=-5..4", text)
         self.assertIn("i16@16=-5..15", text)
-        self.assertIn("yaw-model:", text)
 
     def test_gimbal_angle_correlation_finds_pitch_encoder(self):
         topology = Topology(host=0x2A)
@@ -162,51 +161,54 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("rate-corr:", text)
         self.assertIn("i16@14[pitch=+1.000", text)
 
-    def test_cross_yaw_diagnostics_pair_fc_and_gimbal(self):
+    def test_cross_attitude_models_body_relative_angles(self):
         topology = Topology(host=0x2A)
 
-        def fc_payload(yaw_tenths):
+        def fc_payload(pitch_tenths, roll_tenths, yaw_tenths):
             return struct.pack(
                 "<ddhhhhhhhBBI",
                 0.0, 0.0,
                 0, 0, 0, 0,
-                0, 0, yaw_tenths,
+                pitch_tenths, roll_tenths, yaw_tenths,
                 0, 0, 0,
             )
 
-        def gimbal_payload(stamp, yaw_tenths, reference_hundredths, relative_tenths):
+        def gimbal_payload(stamp, pitch_tenths, roll_tenths, yaw_tenths,
+                           relative_yaw_tenths, joint_pitch_tenths, ext16_tenths):
             return struct.pack(
                 "<hhhBbHBBIhhhh",
-                0, 0, yaw_tenths,
+                pitch_tenths, roll_tenths, yaw_tenths,
                 0x82, 0,
-                relative_tenths & 0xFFFF,
+                relative_yaw_tenths & 0xFFFF,
                 0, 1,
                 stamp,
-                reference_hundredths,
-                0, 0, 0,
+                0, 0, joint_pitch_tenths, ext16_tenths,
             )
 
-        samples = [
-            (1.00, -800, -8000, 100),
-            (2.00, -600, -6000, 100),
-            (3.00, -400, -4000, 100),
+        rows = [
+            ((0, 0, -800), (50, 20, -700), (50, 20, 100)),
+            ((100, 20, -600), (50, 20, -500), (-50, 0, 100)),
+            ((200, -20, -400), (50, 20, -300), (-150, 40, 100)),
         ]
-        for seq, (ts, fc_yaw, ref, rel) in enumerate(samples, 1):
+        for seq, (fc_att, g_att, rel) in enumerate(rows, 1):
             topology.observe(
-                Frame(0x03, 0x0A, seq, 0x03, 0x43, fc_payload(fc_yaw), ack=0),
-                ts,
+                Frame(0x03, 0x0A, seq, 0x03, 0x43, fc_payload(*fc_att), ack=0),
+                float(seq),
             )
             topology.observe(
-                Frame(0x04, 0x2A, seq, 0x04, 0x05,
-                      gimbal_payload(seq * 1000, fc_yaw + rel, ref, rel), ack=0),
-                ts + 0.02,
+                Frame(
+                    0x04, 0x2A, seq, 0x04, 0x05,
+                    gimbal_payload(seq * 1000, *g_att, rel[2], rel[0], rel[1]),
+                    ack=0,
+                ),
+                float(seq) + 0.02,
             )
 
         text = report(topology, verbose=True)
-        self.assertIn("cross-yaw: pairs=3", text)
-        self.assertIn("fc-ref=+1.000", text)
-        self.assertIn("fc-gimbal=+1.000", text)
-        self.assertIn("fc-ref-error: median=0.000deg max=0.000deg", text)
+        self.assertIn("cross-attitude: pairs=3", text)
+        self.assertIn("pitch corr=+1.000 err=0.00/0.00deg", text)
+        self.assertIn("roll corr=+1.000 err=0.00/0.00deg", text)
+        self.assertIn("yaw corr=+1.000 err=0.00/0.00deg", text)
 
     def test_report_distinguishes_confirmed_and_candidates(self):
         host = address(10, 1)
