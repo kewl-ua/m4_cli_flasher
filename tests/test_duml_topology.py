@@ -1,3 +1,4 @@
+import math
 import struct
 import unittest
 
@@ -6,7 +7,13 @@ from dji_duml.frame import AckType, Frame, address
 from dji_duml.profiles import M4T
 from dji_duml.sim import SimulatedM4T
 from dji_duml.topology import Topology, addresses, from_frames, probe_versions, report
-from dji_duml.telemetry import euler_deg_to_quaternion, quaternion_multiply, quaternion_to_euler_deg
+from dji_duml.telemetry import (
+    euler_deg_to_quaternion,
+    quaternion_axis_angle_deg,
+    quaternion_multiply,
+    quaternion_slerp,
+    quaternion_to_euler_deg,
+)
 
 
 class PassiveTopologyTests(unittest.TestCase):
@@ -161,7 +168,7 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("rate-corr:", text)
         self.assertIn("i16@14[pitch=+1.000", text)
 
-    def test_cross_attitude_models_body_relative_angles(self):
+    def test_cross_attitude_recovers_mount_and_joint_order(self):
         topology = Topology(host=0x2A)
 
         def fc_payload(attitude_deg):
@@ -174,13 +181,16 @@ class PassiveTopologyTests(unittest.TestCase):
                 0, 0, 0,
             )
 
-        def gimbal_payload(stamp, body_deg, relative_deg):
-            body_q = euler_deg_to_quaternion(body_deg)
-            rel_q = euler_deg_to_quaternion(relative_deg)
-            world_q = quaternion_multiply(body_q, rel_q)
+        def joint_q(pitch, roll, yaw):
+            q = (1.0, 0.0, 0.0, 0.0)
+            for axis, value in (("z", yaw), ("x", roll), ("y", pitch)):
+                q = quaternion_multiply(q, quaternion_axis_angle_deg(axis, value))
+            return q
+
+        def gimbal_payload(stamp, world_q, joints):
             world_deg = quaternion_to_euler_deg(world_q)
             pitch, roll, yaw = (round(value * 10) for value in world_deg)
-            rel_pitch, rel_roll, rel_yaw = (round(value * 10) for value in relative_deg)
+            rel_pitch, rel_roll, rel_yaw = (round(value * 10) for value in joints)
             prefix = struct.pack(
                 "<hhhBbHBBIhhhh",
                 pitch, roll, yaw,
@@ -192,36 +202,53 @@ class PassiveTopologyTests(unittest.TestCase):
             )
             return prefix + struct.pack("<4f", *world_q) + bytes(9)
 
-        rows = [
-            ((0.0, 0.0, -80.0), (5.0, 2.0, 10.0)),
-            ((35.0, -20.0, -60.0), (-8.0, 6.0, 15.0)),
-            ((-45.0, 30.0, -20.0), (12.0, -4.0, -25.0)),
-            ((70.0, -50.0, 25.0), (-15.0, 9.0, 30.0)),
-        ]
-        for seq, (body_deg, relative_deg) in enumerate(rows, 1):
+        mount_q = euler_deg_to_quaternion((2.0, -3.0, 5.0))
+        body_samples = []
+        for index in range(26):
+            body_deg = (
+                18.0 * math.sin(index * 0.31),
+                22.0 * math.sin(index * 0.23 + 0.4),
+                -70.0 + index * 3.0,
+            )
+            body_q = euler_deg_to_quaternion(body_deg)
+            body_samples.append((body_deg, body_q))
             topology.observe(
-                Frame(0x03, 0x0A, seq, 0x03, 0x43, fc_payload(body_deg), ack=0),
-                float(seq),
+                Frame(0x03, 0x0A, index + 1, 0x03, 0x43,
+                      fc_payload(body_deg), ack=0),
+                index * 0.5,
+            )
+
+        for index in range(25):
+            body_mid = quaternion_slerp(
+                body_samples[index][1],
+                body_samples[index + 1][1],
+                0.5,
+            )
+            joints = (
+                20.0 * math.sin(index * 0.41),
+                15.0 * math.sin(index * 0.37 + 0.7),
+                25.0 * math.sin(index * 0.29 + 1.1),
+            )
+            world_q = quaternion_multiply(
+                body_mid,
+                quaternion_multiply(mount_q, joint_q(*joints)),
             )
             topology.observe(
                 Frame(
-                    0x04, 0x2A, seq, 0x04, 0x05,
-                    gimbal_payload(seq * 1000, body_deg, relative_deg),
+                    0x04, 0x2A, index + 1, 0x04, 0x05,
+                    gimbal_payload((index + 1) * 250, world_q, joints),
                     ack=0,
                 ),
-                float(seq) + 0.02,
+                index * 0.5 + 0.25,
             )
 
         text = report(topology, verbose=True)
         self.assertIn("cross-attitude: samples=", text)
         self.assertIn("best-lag=", text)
-        self.assertIn("fc-bracket=", text)
-        self.assertIn("q-relative-solved:", text)
-        self.assertIn("quaternion-relative-models:", text)
-        self.assertIn("pitch corr=+1.000", text)
-        self.assertIn("roll corr=+1.000", text)
-        self.assertIn("yaw corr=+1.000", text)
         self.assertIn("joint-kinematics:", text)
+        self.assertIn("mount-fit:", text)
+        self.assertIn("left:yaw*roll*pitch=", text)
+        self.assertIn("best-mount: side=left order=yaw*roll*pitch", text)
 
 
     def test_report_distinguishes_confirmed_and_candidates(self):
