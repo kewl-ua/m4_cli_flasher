@@ -7,12 +7,14 @@ device-specific kinematic interpretation.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from .telemetry import (
     GimbalParams,
     euler_deg_to_quaternion,
     quaternion_angular_distance_deg,
     quaternion_axis_angle_deg,
+    quaternion_conjugate,
     quaternion_multiply,
     quaternion_to_euler_deg,
     relative_quaternion,
@@ -111,6 +113,57 @@ class GimbalKinematics:
     ) -> tuple[float, float, float]:
         return quaternion_to_euler_deg(self.world_orientation(fc_attitude_deg, gimbal))
 
+    def solve_joint_angles_deg(
+        self,
+        relative_orientation: Quaternion,
+    ) -> tuple[float, float, float]:
+        """Recover (pitch, roll, yaw) joints from a relative orientation.
+
+        The closed-form decomposition is implemented for the empirically
+        verified M4T order Rz(yaw) * Rx(roll) * Ry(pitch).
+        """
+        if self.joint_order != ("yaw", "roll", "pitch"):
+            raise NotImplementedError(
+                "closed-form joint solving is implemented for yaw/roll/pitch only"
+            )
+
+        if self.mount_side == "left":
+            joints = quaternion_multiply(
+                quaternion_conjugate(self.mount_quaternion),
+                relative_orientation,
+            )
+        else:
+            joints = quaternion_multiply(
+                relative_orientation,
+                quaternion_conjugate(self.mount_quaternion),
+            )
+
+        w, x, y, z = joints
+        norm = (w * w + x * x + y * y + z * z) ** 0.5
+        if norm <= 0:
+            raise ValueError("zero-norm relative orientation")
+        w, x, y, z = (value / norm for value in (w, x, y, z))
+
+        # Rotation matrix elements needed for Rz(yaw) Rx(roll) Ry(pitch).
+        r01 = 2.0 * (x * y - z * w)
+        r11 = 1.0 - 2.0 * (x * x + z * z)
+        r20 = 2.0 * (x * z - y * w)
+        r21 = 2.0 * (y * z + x * w)
+        r22 = 1.0 - 2.0 * (x * x + y * y)
+
+        roll = math.asin(max(-1.0, min(1.0, r21)))
+        cos_roll = math.cos(roll)
+        if abs(cos_roll) < 1e-8:
+            raise ValueError("yaw/roll/pitch decomposition is singular at roll +/-90 deg")
+
+        yaw = math.atan2(-r01, r11)
+        pitch = math.atan2(-r20, r22)
+        return (
+            math.degrees(pitch),
+            math.degrees(roll),
+            math.degrees(yaw),
+        )
+
     def measured_relative_orientation(
         self,
         fc_attitude_deg: tuple[float, float, float],
@@ -121,6 +174,16 @@ class GimbalKinematics:
             raise ValueError("gimbal sample does not contain a measured quaternion")
         fc_world = euler_deg_to_quaternion(fc_attitude_deg)
         return relative_quaternion(fc_world, gimbal.quaternion_wxyz)
+
+    def measured_joint_angles_deg(
+        self,
+        fc_attitude_deg: tuple[float, float, float],
+        gimbal: GimbalParams,
+    ) -> tuple[float, float, float]:
+        """Recover joints independently from FC attitude + measured quaternion."""
+        return self.solve_joint_angles_deg(
+            self.measured_relative_orientation(fc_attitude_deg, gimbal)
+        )
 
     def orientation_error_deg(
         self,
