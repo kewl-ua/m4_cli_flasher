@@ -1763,7 +1763,7 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                         f"lag={item['lag_samples']:+d} "
                                         f"corr={item['corr']:+.3f} "
                                         f"scale={item['slope']:+.5f} "
-                                        f"bias={item['intercept']:+.2f} "
+                                        f"bias={_canonical_zero(item['intercept'], epsilon=0.005):+.2f} "
                                         f"rmse={item['rmse']:.2f}"
                                     )
                                 lines.append(
@@ -1778,7 +1778,7 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                         f"mode={item['mode']} "
                                         f"corr={item['corr']:+.3f} "
                                         f"scale={item['slope']:+.5f} "
-                                        f"bias={item['intercept']:+.2f} "
+                                        f"bias={_canonical_zero(item['intercept'], epsilon=0.005):+.2f} "
                                         f"rmse={item['rmse']:.2f}"
                                     )
                                 lines.append(
