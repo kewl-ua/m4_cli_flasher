@@ -394,10 +394,15 @@ def _gimbal_window_stats(stream: TrafficStream) -> dict | None:
         for axis, (legacy, quat) in enumerate(zip(item.attitude_deg, item.quaternion_euler_deg)):
             errors[axis].append(_angle_error_degrees(legacy, quat))
 
+    timestamps = [
+        item.timestamp_ms for item in decoded
+        if item.timestamp_ms is not None
+    ]
     result = {
         "attitude_ranges": (_range(pitch), _range(roll), _range(yaw)),
         "quaternion_norm_range": _range(norms),
         "quaternion_max_error": tuple(max(axis) if axis else None for axis in errors),
+        "timestamp_range": _range(timestamps),
     }
     if raw:
         result["raw_ranges"] = (
@@ -536,6 +541,21 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                     f"       q-check: |q|={qnorm[0]:.6f}..{qnorm[1]:.6f} "
                                     f"max-error=({qerr[0]:.3f},{qerr[1]:.3f},{qerr[2]:.3f})deg"
                                 )
+                            timestamp_range = stats.get("timestamp_range")
+                            if timestamp_range is not None:
+                                device_span = timestamp_range[1] - timestamp_range[0]
+                                wall_span = stream.duration
+                                scale = (
+                                    device_span / (wall_span * 1000.0)
+                                    if wall_span and wall_span > 0 else None
+                                )
+                                clock = (
+                                    f"       clock@0C: {int(timestamp_range[0])}.."
+                                    f"{int(timestamp_range[1])} ms span={int(device_span)}ms"
+                                )
+                                if scale is not None:
+                                    clock += f" scale={scale:.4f}x"
+                                lines.append(clock)
                             raw_ranges = stats.get("raw_ranges")
                             if raw_ranges is not None:
                                 raw_names = ("u32@0C", "u32@10", "i16@14", "i16@16")
