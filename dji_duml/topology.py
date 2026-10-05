@@ -1414,6 +1414,44 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                 lines.append(
                                     "       tail-rate-corr: " + "  ".join(corr_parts)
                                 )
+                            if tail["second_rate_correlations"]:
+                                corr_parts = [
+                                    f"{item['type']}@{item['offset']:02X}"
+                                    f"->{item['signal']}={item['corr']:+.3f}"
+                                    for item in tail["second_rate_correlations"]
+                                ]
+                                lines.append(
+                                    "       tail-accel-corr: " + "  ".join(corr_parts)
+                                )
+                            if tail["counter_candidates"]:
+                                counter_parts = [
+                                    f"@{item['offset']:02X}="
+                                    f"{item['median_rate_hz']:.2f}/s "
+                                    f"step~{item['median_step']:.1f} "
+                                    f"mad={item['mad_rate']:.2f}"
+                                    for item in tail["counter_candidates"]
+                                ]
+                                lines.append(
+                                    "       tail-counter-like: " + "  ".join(counter_parts)
+                                )
+                            if tail["categorical_states"]:
+                                for item in tail["categorical_states"][:8]:
+                                    rendered_states = []
+                                    for state in item["states"]:
+                                        rates = state["median_abs_rates"]
+                                        rate_text = ",".join(
+                                            f"{name.replace('_rate', '')}={value:.1f}"
+                                            for name, value in rates.items()
+                                            if value is not None
+                                        ) or "-"
+                                        rendered_states.append(
+                                            f"{state['value']:02X}:n{state['count']}"
+                                            f"/|rate|[{rate_text}]"
+                                        )
+                                    lines.append(
+                                        f"       tail-state@{item['offset']:02X}: "
+                                        + "  ".join(rendered_states)
+                                    )
                 elif stream.cmd_set == 0x04 and stream.cmd_id == 0x05:
                     from .telemetry import parse_gimbal_params
                     try:
