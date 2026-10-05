@@ -57,20 +57,10 @@ class DumlClient:
         self._summary_due = time.monotonic() + SUMMARY_INTERVAL
         #: Fixed replies to requests the device sends to this host, keyed by
         #: (cmd_set, cmd_id); such requests are answered and not passed on.
-        self.responders: dict[tuple[int, int], bytes | Callable[[Frame], bytes | Frame | None]] = {}
+        self.responders: dict[tuple[int, int], bytes] = {}
         self._keepalive: tuple[float, Callable[[], Frame]] | None = None
         self._keepalive_due = 0.0
         self._deferred: TransportError | None = None
-
-    def add_request_handler(self, cmd_set: int, cmd_id: int,
-                            handler: bytes | Callable[[Frame], bytes | Frame | None]) -> None:
-        """Handle requests addressed to this host.
-
-        A bytes value preserves the old fixed-responder behaviour. A callable
-        may derive bytes or a complete Frame from the incoming request; None
-        means the request was handled deliberately without a reply.
-        """
-        self.responders[(cmd_set, cmd_id)] = handler
 
     def set_keepalive(self, interval: float, sender: int, receiver: int, cmd_set: int,
                       cmd_id: int, payload: bytes = b"") -> None:
@@ -128,19 +118,8 @@ class DumlClient:
                               f"{frame.cmd_set:02x}/{frame.cmd_id:02x}"] += 1
             answer = self.responders.get((frame.cmd_set, frame.cmd_id))
             if answer is not None and not frame.response and frame.receiver == self.host:
-                try:
-                    result = answer(frame) if callable(answer) else answer
-                    if result is not None:
-                        reply = result if isinstance(result, Frame) else frame.make_reply(result)
-                        self._write_later(reply, log=False)
-                    self._counted[f"answered {frame.cmd_set:02x}/{frame.cmd_id:02x}"] += 1
-                except Exception as exc:
-                    # A user handler must not take the receive loop down. Leave
-                    # the request visible to the caller and record the failure.
-                    self.journal.event("responder-error", sync=False,
-                                       command=f"{frame.cmd_set:02x}/{frame.cmd_id:02x}",
-                                       error=repr(exc))
-                    passed.append(frame)
+                self._counted[f"answered {frame.cmd_set:02x}/{frame.cmd_id:02x}"] += 1
+                self._write_later(frame.make_reply(answer), log=False)
             else:
                 passed.append(frame)
         if self._keepalive is not None and now >= self._keepalive_due:
