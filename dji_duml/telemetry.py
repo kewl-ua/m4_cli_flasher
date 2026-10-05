@@ -166,12 +166,12 @@ class GimbalParams:
     yaw on stationary captures, strongly identifying them as a quaternion.
 
     Bytes 12..15 are verified on M4T as a millisecond monotonic timestamp.
-    Controlled captures establish a secondary pitch/joint field at 0x14
-    (signed int16, 0.1 degree) and show the legacy 0x08 yaw-angle field behaving
-    as a body-relative yaw candidate. Field 0x10 is a signed 0.01-degree
-    internal yaw reference, but body-rotation tests show it is not simply
-    FC/body yaw. Bytes 0x12..0x13, 0x16..0x17 and 40..end remain unnamed until
-    independently verified.
+    Controlled body-motion captures establish body-relative pitch and roll
+    joint fields at 0x14 and 0x16 (signed int16, 0.1 degree), while the legacy
+    0x08 yaw-angle field behaves as body-relative yaw. These three fields track
+    the Euler angles recovered from inverse(q_FC) * q_gimbal. Field 0x10 is a
+    signed 0.01-degree internal yaw-reference candidate but is not simply
+    FC/body yaw. Bytes 0x12..0x13 and 40..end remain unnamed.
     """
 
     pitch_tenths: int
@@ -187,7 +187,7 @@ class GimbalParams:
     yaw_reference_hundredths: int | None
     extension_12_raw: int | None
     pitch_joint_tenths: int | None
-    extension_16_raw: int | None
+    roll_joint_tenths: int | None
     quaternion_wxyz: tuple[float, float, float, float] | None
     tail: bytes
 
@@ -219,10 +219,22 @@ class GimbalParams:
 
     @property
     def pitch_joint_deg(self) -> float | None:
-        """Secondary pitch/joint angle at payload 0x14, in 0.1 degrees."""
+        """Body-relative gimbal pitch joint at payload 0x14, in 0.1 degrees."""
         if self.pitch_joint_tenths is None:
             return None
         return self.pitch_joint_tenths / 10.0
+
+    @property
+    def roll_joint_deg(self) -> float | None:
+        """Body-relative gimbal roll joint at payload 0x16, in 0.1 degrees."""
+        if self.roll_joint_tenths is None:
+            return None
+        return self.roll_joint_tenths / 10.0
+
+    @property
+    def joint_angles_deg(self) -> tuple[float | None, float | None, float]:
+        """Mechanical/body-relative (pitch, roll, yaw) joint angles."""
+        return self.pitch_joint_deg, self.roll_joint_deg, self.relative_yaw_deg
 
     @property
     def quaternion_norm(self) -> float | None:
@@ -284,7 +296,7 @@ def parse_gimbal_params(payload: bytes) -> GimbalParams:
     pitch_joint_tenths = (
         int.from_bytes(payload[20:22], "little", signed=True) if len(payload) >= 22 else None
     )
-    extension_16_raw = (
+    roll_joint_tenths = (
         int.from_bytes(payload[22:24], "little", signed=True) if len(payload) >= 24 else None
     )
 
@@ -302,7 +314,7 @@ def parse_gimbal_params(payload: bytes) -> GimbalParams:
         yaw_reference_hundredths=yaw_reference_hundredths,
         extension_12_raw=extension_12_raw,
         pitch_joint_tenths=pitch_joint_tenths,
-        extension_16_raw=extension_16_raw,
+        roll_joint_tenths=roll_joint_tenths,
         quaternion_wxyz=quaternion,
         tail=tail,
     )
