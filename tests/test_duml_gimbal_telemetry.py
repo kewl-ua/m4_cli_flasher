@@ -3,7 +3,15 @@ import unittest
 
 from dji_duml.errors import UnexpectedReply
 from dji_duml.frame import Frame
-from dji_duml.telemetry import GimbalParams, decode_known, parse_gimbal_params
+from dji_duml.telemetry import (
+    GimbalParams,
+    decode_known,
+    euler_deg_to_quaternion,
+    parse_gimbal_params,
+    quaternion_multiply,
+    quaternion_to_euler_deg,
+    relative_quaternion,
+)
 
 
 class GimbalParamsTests(unittest.TestCase):
@@ -72,6 +80,17 @@ class GimbalParamsTests(unittest.TestCase):
         self.assertLess(item.quaternion_orientation_error_deg, 0.1)
         self.assertAlmostEqual(item.relative_yaw_deg, 27.4, places=1)
         self.assertAlmostEqual(item.yaw_reference_deg, -86.85, places=2)
+
+    def test_quaternion_frame_composition_recovers_relative_orientation(self):
+        body = (35.0, -20.0, -60.0)
+        relative = (-8.0, 6.0, 15.0)
+        body_q = euler_deg_to_quaternion(body)
+        relative_q = euler_deg_to_quaternion(relative)
+        world_q = quaternion_multiply(body_q, relative_q)
+        solved_q = relative_quaternion(body_q, world_q)
+        solved = quaternion_to_euler_deg(solved_q)
+        for expected, actual in zip(relative, solved):
+            self.assertAlmostEqual(expected, actual, places=6)
 
     def test_quaternion_wz_matches_stationary_legacy_yaw(self):
         item = parse_gimbal_params(self.STATIONARY)
