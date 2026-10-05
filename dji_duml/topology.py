@@ -719,14 +719,20 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
 
 
 def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
-    """Describe the opaque M4T FLYC 03/43 tail without assigning semantics."""
+    """Describe post-prefix FLYC 03/43 bytes without promoting semantics.
+
+    Public legacy DUML layouts extend through payload offset 0x36 (55 bytes).
+    M4T carries 84 bytes, so offsets 0x37..0x53 are the genuinely newer
+    extension. Legacy labels below are historical candidates only: a slot may
+    have been repurposed on M4T.
+    """
     if stream.cmd_set != 0x03 or stream.cmd_id != 0x43:
         return None
 
     from .telemetry import parse_flyc_osd_general
 
     rows = []
-    for _, payload in stream._samples:
+    for timestamp, payload in stream._samples:
         try:
             item = parse_flyc_osd_general(payload)
         except UnexpectedReply:
@@ -736,6 +742,7 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         vx, vy, vz = item.velocity_mps
         pitch, roll, yaw = item.attitude_deg
         rows.append((
+            timestamp,
             payload,
             {
                 "height": item.relative_height_m,
@@ -752,14 +759,16 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         return None
 
     start = 36
-    end = min(len(row[0]) for row in rows)
+    legacy_end = 55
+    end = min(len(row[1]) for row in rows)
     changed = []
     byte_ranges = {}
     bit_masks = {}
-    first = rows[0][0]
+    byte_steps = {}
+    first = rows[0][1]
 
     for offset in range(start, end):
-        values = [payload[offset] for payload, _ in rows]
+        values = [payload[offset] for _, payload, _ in rows]
         low, high = min(values), max(values)
         if low != high:
             changed.append(offset)
@@ -769,12 +778,22 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
             for value in values:
                 mask |= base ^ value
             bit_masks[offset] = mask
+            deltas = Counter(
+                (current - previous) & 0xFF
+                for previous, current in zip(values, values[1:])
+            )
+            byte_steps[offset] = tuple(deltas.most_common(3))
 
+    changed_set = set(changed)
+
+    # Sliding words are intentional: legacy unknown35 is at odd offset 0x35.
     words = []
-    for offset in range(start, end - 1, 2):
+    for offset in range(start, end - 1):
+        if offset not in changed_set and offset + 1 not in changed_set:
+            continue
         raw = [
             int.from_bytes(payload[offset:offset + 2], "little", signed=False)
-            for payload, _ in rows
+            for _, payload, _ in rows
         ]
         if len(set(raw)) <= 1:
             continue
@@ -790,14 +809,46 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         })
 
     signals = {
-        name: [known[name] for _, known in rows]
+        name: [known[name] for _, _, known in rows]
         for name in ("height", "vx", "vy", "vz", "pitch", "roll", "yaw")
     }
+
+    # Derivatives use host receive time. They are hints only because 03/43 has
+    # no verified device timestamp and is only ~2 Hz.
+    rate_signals = {
+        name: [None] * len(rows)
+        for name in ("height_rate", "ax", "ay", "az", "pitch_rate", "roll_rate", "yaw_rate")
+    }
+    source_names = {
+        "height_rate": "height",
+        "ax": "vx",
+        "ay": "vy",
+        "az": "vz",
+        "pitch_rate": "pitch",
+        "roll_rate": "roll",
+        "yaw_rate": "yaw",
+    }
+    angle_sources = {"pitch_rate", "roll_rate", "yaw_rate"}
+    for index in range(1, len(rows)):
+        previous_time, _, previous = rows[index - 1]
+        current_time, _, current = rows[index]
+        if previous_time is None or current_time is None:
+            continue
+        dt = current_time - previous_time
+        if not 0.1 <= dt <= 1.0:
+            continue
+        for target_name, source_name in source_names.items():
+            delta = current[source_name] - previous[source_name]
+            if target_name in angle_sources:
+                delta = _angle_delta_degrees(current[source_name], previous[source_name])
+            rate_signals[target_name][index] = delta / dt
+
     correlations = []
+    rate_correlations = []
     for offset in range(start, end - 1):
         unsigned = [
             int.from_bytes(payload[offset:offset + 2], "little", signed=False)
-            for payload, _ in rows
+            for _, payload, _ in rows
         ]
         if len(set(unsigned)) <= 2:
             continue
@@ -818,21 +869,92 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
                     "corr": corr,
                     "unique": len(set(values)),
                 })
+            for signal, target in rate_signals.items():
+                paired = [
+                    (numeric[index], value)
+                    for index, value in enumerate(target)
+                    if value is not None
+                ]
+                if len(paired) < 3:
+                    continue
+                raw_values = [item[0] for item in paired]
+                rate_values = [item[1] for item in paired]
+                corr = _pearson(raw_values, rate_values)
+                if corr is None or abs(corr) < 0.75:
+                    continue
+                rate_correlations.append({
+                    "offset": offset,
+                    "type": signedness,
+                    "signal": signal,
+                    "corr": corr,
+                    "unique": len(set(raw_values)),
+                })
 
     correlations.sort(
         key=lambda item: (-abs(item["corr"]), item["offset"], item["type"], item["signal"])
     )
+    rate_correlations.sort(
+        key=lambda item: (-abs(item["corr"]), item["offset"], item["type"], item["signal"])
+    )
+
+    legacy_specs = (
+        (0x24, 1, "gps_nums"),
+        (0x25, 1, "gohome_reason"),
+        (0x26, 1, "start_fail_state"),
+        (0x27, 1, "controller_state_ext"),
+        (0x28, 1, "battery_remain"),
+        (0x29, 1, "ultrasonic_height"),
+        (0x2A, 2, "motor_startup_time"),
+        (0x2C, 1, "motor_start_count"),
+        (0x2D, 1, "battery_alarm1"),
+        (0x2E, 1, "battery_alarm2"),
+        (0x2F, 1, "version_match"),
+        (0x30, 1, "product_type"),
+        (0x31, 1, "imu_init_fail_reason"),
+        (0x32, 1, "motor_fail_reason"),
+        (0x33, 1, "motor_start_cause"),
+        (0x34, 1, "sdk_ctrl_device"),
+        (0x35, 2, "unknown35"),
+    )
+    legacy_slots = []
+    for offset, size, name in legacy_specs:
+        if offset + size > end:
+            continue
+        raw_values = [
+            int.from_bytes(payload[offset:offset + size], "little", signed=False)
+            for _, payload, _ in rows
+        ]
+        signed_values = [
+            int.from_bytes(payload[offset:offset + size], "little", signed=True)
+            for _, payload, _ in rows
+        ]
+        legacy_slots.append({
+            "offset": offset,
+            "size": size,
+            "name": name,
+            "u_range": (min(raw_values), max(raw_values)),
+            "i_range": (min(signed_values), max(signed_values)),
+            "unique": len(set(raw_values)),
+            "changed": len(set(raw_values)) > 1,
+        })
 
     return {
-        "changed": set(changed),
+        "changed": changed_set,
+        "legacy_changed": {offset for offset in changed_set if offset < legacy_end},
+        "m4t_changed": {offset for offset in changed_set if offset >= legacy_end},
         "byte_ranges": byte_ranges,
         "bit_masks": bit_masks,
+        "byte_steps": byte_steps,
         "words": words,
         "correlations": correlations[:12],
+        "rate_correlations": rate_correlations[:12],
+        "legacy_slots": legacy_slots,
         "samples": len(rows),
         "tail_start": start,
+        "legacy_end": legacy_end,
         "tail_end": end,
     }
+
 
 
 def _gimbal_angle_correlations(stream: TrafficStream) -> dict[str, dict[str, float | None]]:
