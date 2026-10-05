@@ -67,6 +67,11 @@ class GimbalParamsTests(unittest.TestCase):
         self.assertLess(item.quaternion_orientation_error_deg, 0.1)
         self.assertAlmostEqual(item.yaw_reference_deg, -86.85, places=2)
         self.assertAlmostEqual(item.pitch_joint_deg, 25.2, places=1)
+        self.assertAlmostEqual(item.roll_joint_deg, 2.4, places=1)
+        self.assertEqual(
+            item.joint_angles_deg,
+            (item.pitch_joint_deg, item.roll_joint_deg, item.relative_yaw_deg),
+        )
 
     def test_yaw_only_capture_matches_quaternion_euler(self):
         item = parse_gimbal_params(self.YAW_ONLY)
