@@ -391,6 +391,11 @@ def _unwrap_degrees(values: list[float]) -> list[float]:
     return result
 
 
+def _canonical_zero(value: float, *, epsilon: float = 0.0005) -> float:
+    """Collapse tiny signed floating-point noise to a canonical +0.0."""
+    return 0.0 if abs(value) < epsilon else value
+
+
 def _median(values: list[float]) -> float | None:
     if not values:
         return None
@@ -1730,7 +1735,7 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                         f"lag={item['lag_samples']:+d} "
                                         f"corr={item['corr']:+.3f} "
                                         f"scale={item['slope']:+.5f} "
-                                        f"bias={item['intercept']:+.2f} "
+                                        f"bias={_canonical_zero(item['intercept'], epsilon=0.005):+.2f} "
                                         f"rmse={item['rmse']:.2f}"
                                     )
                                 lines.append(
