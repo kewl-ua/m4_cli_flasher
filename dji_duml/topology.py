@@ -1239,13 +1239,19 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
                     "corr": corr,
                     "samples": len(xs),
                 }
-                if best is None or (
-                    abs(candidate["corr"]),
-                    -candidate["rmse"],
-                ) > (
-                    abs(best["corr"]),
-                    -best["rmse"],
-                ):
+                candidate_rank = (
+                    round(abs(candidate["corr"]), 12),
+                    -round(candidate["rmse"], 12),
+                    -abs(candidate["intercept"]),
+                    1 if candidate["mode"] == "trapezoid" else 0,
+                )
+                best_rank = None if best is None else (
+                    round(abs(best["corr"]), 12),
+                    -round(best["rmse"], 12),
+                    -abs(best["intercept"]),
+                    1 if best["mode"] == "trapezoid" else 0,
+                )
+                if best is None or candidate_rank > best_rank:
                     best = candidate
             if best is not None:
                 unknown35_interval_fits.append(best)
