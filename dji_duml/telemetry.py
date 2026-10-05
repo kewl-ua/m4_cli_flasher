@@ -136,6 +136,45 @@ def quaternion_angular_distance_deg(
     return math.degrees(2.0 * math.acos(dot))
 
 
+def quaternion_slerp(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+    fraction: float,
+) -> tuple[float, float, float, float]:
+    """Shortest-path spherical interpolation between two orientations."""
+    if fraction <= 0.0:
+        return left
+    if fraction >= 1.0:
+        return right
+
+    lnorm = sum(value * value for value in left) ** 0.5
+    rnorm = sum(value * value for value in right) ** 0.5
+    if lnorm <= 0 or rnorm <= 0:
+        raise ValueError("zero-norm quaternion")
+    a = tuple(value / lnorm for value in left)
+    b = tuple(value / rnorm for value in right)
+
+    dot = sum(x * y for x, y in zip(a, b))
+    if dot < 0.0:
+        b = tuple(-value for value in b)
+        dot = -dot
+    dot = max(-1.0, min(1.0, dot))
+
+    if dot > 0.9995:
+        q = tuple(x + fraction * (y - x) for x, y in zip(a, b))
+        norm = sum(value * value for value in q) ** 0.5
+        return tuple(value / norm for value in q)
+
+    theta = math.acos(dot)
+    sin_theta = math.sin(theta)
+    left_weight = math.sin((1.0 - fraction) * theta) / sin_theta
+    right_weight = math.sin(fraction * theta) / sin_theta
+    return tuple(
+        left_weight * x + right_weight * y
+        for x, y in zip(a, b)
+    )
+
+
 def quaternion_to_euler_deg(
     quaternion: tuple[float, float, float, float],
 ) -> tuple[float, float, float]:
