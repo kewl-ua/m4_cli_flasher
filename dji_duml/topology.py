@@ -1095,6 +1095,101 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
                     "unique_ratio": unique_ratio,
                 })
 
+    counter_offsets = {item["offset"] for item in counter_candidates}
+
+    def linear_fit(xs, ys):
+        if len(xs) < 4:
+            return None
+        x_mean = sum(xs) / len(xs)
+        y_mean = sum(ys) / len(ys)
+        variance = sum((value - x_mean) ** 2 for value in xs)
+        if variance <= 0:
+            return None
+        covariance = sum(
+            (x - x_mean) * (y - y_mean)
+            for x, y in zip(xs, ys)
+        )
+        slope = covariance / variance
+        intercept = y_mean - slope * x_mean
+        residuals = [
+            y - (slope * x + intercept)
+            for x, y in zip(xs, ys)
+        ]
+        rmse = (
+            sum(value * value for value in residuals) / len(residuals)
+        ) ** 0.5
+        corr = _pearson(xs, ys)
+        return slope, intercept, rmse, corr
+
+    body_rate_fits = []
+    for offset in range(start, end - 1):
+        if offset in counter_offsets:
+            continue
+        values = [
+            int.from_bytes(
+                payload[offset:offset + 2],
+                "little",
+                signed=True,
+            )
+            for _, payload, _ in rows
+        ]
+        if len(set(values)) < 5:
+            continue
+        numeric = [float(value) for value in values]
+        for signal, target in body_rate_signals.items():
+            best = None
+            for lag_samples in range(-3, 4):
+                xs = []
+                ys = []
+                for raw_index, raw_value in enumerate(numeric):
+                    target_index = raw_index + lag_samples
+                    if not 0 <= target_index < len(target):
+                        continue
+                    target_value = target[target_index]
+                    if target_value is None:
+                        continue
+                    xs.append(raw_value)
+                    ys.append(float(target_value))
+                fitted = linear_fit(xs, ys)
+                if fitted is None:
+                    continue
+                slope, intercept, rmse, corr = fitted
+                if corr is None:
+                    continue
+                candidate = {
+                    "offset": offset,
+                    "type": "i16",
+                    "signal": signal,
+                    "lag_samples": lag_samples,
+                    "slope": slope,
+                    "intercept": intercept,
+                    "rmse": rmse,
+                    "corr": corr,
+                    "samples": len(xs),
+                }
+                if best is None or (
+                    abs(candidate["corr"]),
+                    -candidate["rmse"],
+                    -abs(candidate["lag_samples"]),
+                ) > (
+                    abs(best["corr"]),
+                    -best["rmse"],
+                    -abs(best["lag_samples"]),
+                ):
+                    best = candidate
+            if best is not None and abs(best["corr"]) >= 0.80:
+                body_rate_fits.append(best)
+
+    body_rate_fits.sort(
+        key=lambda item: (
+            -abs(item["corr"]),
+            item["rmse"],
+            abs(item["lag_samples"]),
+            item["offset"],
+            item["signal"],
+        )
+    )
+
     legacy_continuation_offsets = {
         offset + byte_index
         for offset, size, _ in legacy_specs
@@ -1149,6 +1244,7 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         "rate_correlations": rate_correlations[:12],
         "second_rate_correlations": second_rate_correlations[:12],
         "body_rate_correlations": body_rate_correlations[:12],
+        "body_rate_fits": body_rate_fits[:12],
         "counter_candidates": counter_candidates,
         "categorical_states": categorical_states,
         "legacy_slots": legacy_slots,
