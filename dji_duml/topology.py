@@ -1101,6 +1101,27 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         unique_values = sorted(set(values))
         if not 2 <= len(unique_values) <= 8:
             continue
+
+        # Suppress a byte that is only 00/FF when it is the sign-extension
+        # byte of a dynamic signed word starting one byte earlier.
+        if (
+            offset > start
+            and set(unique_values).issubset({0x00, 0xFF})
+        ):
+            previous_words = [
+                int.from_bytes(
+                    payload[offset - 1:offset + 1],
+                    "little",
+                    signed=True,
+                )
+                for _, payload, _ in rows
+            ]
+            if (
+                len(set(previous_words)) >= 8
+                and min(previous_words) < 0 < max(previous_words)
+            ):
+                continue
+
         states = []
         for value in unique_values:
             indexes = [index for index, current in enumerate(values) if current == value]
