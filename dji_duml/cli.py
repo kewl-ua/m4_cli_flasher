@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -12,10 +13,12 @@ from .client import DumlClient
 from .errors import (
     DumlError, FlashAborted, FlashFailed, FlashOutcomeUnknown, FlashRefused,
 )
+from .display import ProgressView
 from .extract import REPORT, extract
-from .flasher import LEGACY_FTP, PROCEDURES, Flasher, Progress, Stage, plan
+from .flasher import PROCEDURES, UPGRADE_CENTER, Flasher, Stage, plan
 from .frame import format_address
 from .journal import Journal
+from .pack import pack
 from .package import inspect_package
 from .profiles import PROFILES, get_profile
 from .version import FirmwareVersion
@@ -211,10 +214,22 @@ def cmd_extract(args, profile) -> int:
     return 0 if result.ok else 2
 
 
-def _progress(progress: Progress) -> None:
-    percent = "" if progress.percent is None else f" {progress.percent:3d}%"
-    detail = f" {progress.detail}" if progress.detail else ""
-    _say(f"[{time.strftime('%H:%M:%S')}] {progress.stage.value}{percent}{detail}")
+def cmd_pack(args, profile) -> int:
+    packed = pack(args.directory, args.output)
+    package = packed.package
+    _show_package(package)
+    _say(f"files     {len(package.files)}, {package.files_size} bytes, "
+         "each module as its signed manifest states")
+    if packed.ignored:
+        _say(_ascii(f"ignored   {', '.join(packed.ignored)}"))
+    for note in packed.notes:
+        _say(f"note: {note}")
+    if package.product_code.lower() != profile.product_code.lower():
+        _say(f"warning: profile {profile.key} expects product {profile.product_code!r}")
+    _say(f"Flash it with: dji-duml flash {subprocess.list2cmdline([str(args.output)])} "
+         f"--target {package.version} --expected-current <version on the drone> --yes"
+         " (add --refresh if the drone already runs this version)")
+    return 0
 
 
 def cmd_flash(args, profile) -> int:
@@ -227,13 +242,16 @@ def cmd_flash(args, profile) -> int:
     journal_path = args.journal or Path("dji-duml-journal") / (
         time.strftime("%Y%m%d-%H%M%S") + f"-{profile.key}.jsonl")
     drone = _drone(args, profile, image_version=args.target)
-    with Journal(journal_path) as journal:
+    # The upgrade center gets the manifest's files, legacy-ftp the whole image.
+    center = (args.procedure or profile.default_procedure) == UPGRADE_CENTER
+    total = package.files_size if center and package.files else package.size
+    with Journal(journal_path) as journal, ProgressView(total, verbose=args.verbose) as view:
         _say(f"journal   {journal_path}")
         flasher = Flasher(
             _opener(args, profile, journal, drone), profile, journal=journal,
-            on_progress=_progress, **({"upload": drone.upload, "reconnect_interval": 0.05,
-                                       "settle_timeout": 1.0, "greet_delay": 0.05}
-                                      if drone else {}),
+            on_progress=view, **({"upload": drone.upload, "reconnect_interval": 0.05,
+                                  "settle_timeout": 1.0, "greet_delay": 0.05}
+                                 if drone else {}),
         )
         try:
             result = flasher.run(
@@ -243,6 +261,7 @@ def cmd_flash(args, profile) -> int:
             )
         except KeyboardInterrupt:
             stage = flasher.stage
+            view.close()
             _say()
             if stage in (Stage.START, Stage.VERIFY, Stage.USER_CONFIRM, Stage.UPGRADING,
                          Stage.REBOOT):
@@ -250,6 +269,9 @@ def cmd_flash(args, profile) -> int:
                      "power it off. Read its version when it is idle.")
             elif stage is Stage.DONE:
                 _say("Interrupted after the flash finished; see the journal for the result.")
+            elif stage is Stage.CONFIRM:
+                _say("Interrupted after the device reported success, before its version was "
+                     "read back. Leave it powered and read its version when it is idle.")
             elif stage in (None, Stage.PREFLIGHT):
                 _say("Interrupted before anything was written to the device.")
             else:
@@ -265,8 +287,10 @@ def cmd_flash(args, profile) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dji-duml", description="Direct DUML over USB, without DJI Assistant.")
-    parser.add_argument("--profile", default="m4t", choices=sorted(PROFILES))
-    parser.add_argument("--backend", default="auto", choices=("auto", "libusb0", "libusb1"))
+    parser.add_argument("--profile", default="m4t", choices=sorted(PROFILES),
+                        help="device model (default m4t)")
+    parser.add_argument("--backend", default="auto", choices=("auto", "libusb0", "libusb1"),
+                        help="USB library; libusb0 on Windows also means DJI's own DLL")
     parser.add_argument("--usb-location", help="bus:address as printed by scan")
     parser.add_argument("--serial", help="USB serial number of the device")
     parser.add_argument("--journal", type=Path, help="JSONL log of every frame and decision")
@@ -276,37 +300,45 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("scan", help="list matching USB devices (descriptor requests only)")
     version = sub.add_parser("version", help="read hardware and firmware version")
-    version.add_argument("--json", action="store_true")
+    version.add_argument("--json", action="store_true", help="one JSON object")
     inspect = sub.add_parser("inspect", help="check a firmware package without USB")
-    inspect.add_argument("package")
+    inspect.add_argument("package", help="offline ZIP, dji_system.bin or a pack output")
     planner = sub.add_parser("plan", help="print the frames a flash would send; sends nothing")
-    planner.add_argument("package")
+    planner.add_argument("package", help="offline ZIP, dji_system.bin or a pack output")
     planner.add_argument("--procedure", choices=PROCEDURES,
                          help="default: the profile's (upgrade-center for m4t)")
 
     decode = sub.add_parser("decode", help="decode DUML frames from a USBPcap/usbmon capture")
-    decode.add_argument("capture")
+    decode.add_argument("capture", help="pcap or pcapng, USBPcap or usbmon")
     decode.add_argument("--device", type=_number, help="USB device address to keep")
     decode.add_argument("--endpoint", type=_number, action="append",
                         help="endpoint address to keep, e.g. 0x04 and 0x85; repeatable")
-    decode.add_argument("--cmd-set", type=_number)
+    decode.add_argument("--cmd-set", type=_number, help="keep only this command set")
     decode.add_argument("--upgrade-only", action="store_true",
                         help="keep only upgrade and file-transfer commands of the general set")
     decode.add_argument("--summary", action="store_true", help="count frames per command")
     decode.add_argument("--full", action="store_true", help="do not truncate payloads")
-    decode.add_argument("--json", action="store_true")
+    decode.add_argument("--json", action="store_true", help="one JSON object per frame")
 
     extractor = sub.add_parser(
         "extract", help="recover the files a capture shows being sent to the upgrade center")
-    extractor.add_argument("capture")
+    extractor.add_argument("capture", help="pcap or pcapng, USBPcap or usbmon")
     extractor.add_argument("-o", "--output", required=True,
                            help="new or empty directory for the files and report.json")
     extractor.add_argument("--device", type=_number, help="USB device address to keep")
 
+    packer = sub.add_parser(
+        "pack", help="build a package for flash from the files extract recovered")
+    packer.add_argument("directory", help="extract's output, or a .cfg.sig with its modules")
+    packer.add_argument("-o", "--output", required=True,
+                        help="package file to write, e.g. 17.01.0516_dji_system.bin")
+
     flash = sub.add_parser("flash", help="write firmware (device must be prepared)")
-    flash.add_argument("package", help="dji_system.bin tar image")
-    flash.add_argument("--target", required=True)
-    flash.add_argument("--expected-current", required=True)
+    flash.add_argument("package", help="offline ZIP, dji_system.bin or a pack output")
+    flash.add_argument("--target", required=True,
+                       help="version the package installs; checked against its manifest")
+    flash.add_argument("--expected-current", required=True,
+                       help="version the drone runs now; checked before any changing command")
     flash.add_argument("--yes", action="store_true", help="authorize the firmware write")
     flash.add_argument("--procedure", choices=PROCEDURES,
                        help="default: the profile's (upgrade-center for m4t)")
@@ -315,12 +347,14 @@ def build_parser() -> argparse.ArgumentParser:
     flash.add_argument("--refresh", action="store_true", help="allow reflashing the same version")
     flash.add_argument("--timeout", type=float, default=1800,
                        help="seconds allowed for the upgrade after the start request")
+    flash.add_argument("-v", "--verbose", action="store_true",
+                       help="print every progress report on its own line")
     return parser
 
 
 HANDLERS = {"scan": cmd_scan, "version": cmd_version, "inspect": cmd_inspect,
             "plan": cmd_plan, "decode": cmd_decode, "extract": cmd_extract,
-            "flash": cmd_flash}
+            "pack": cmd_pack, "flash": cmd_flash}
 
 
 def main(argv: list[str] | None = None) -> int:

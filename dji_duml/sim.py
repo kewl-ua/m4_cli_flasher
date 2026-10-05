@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections import Counter
 from pathlib import Path
 
 from . import commands
@@ -224,7 +225,8 @@ class SimulatedM4T(SimulatedDrone):
     def __init__(self, profile: DeviceProfile, firmware: str = "17.01.0516", *,
                  reboots: int = 1, zero_version_reads: int = 2, progress_every: int = 1250,
                  end_status: dict[str, int] | None = None, stop_after_files: int | None = None,
-                 mute_progress: bool = False, **options):
+                 mute_progress: bool = False, lose=(), repeat_reports: int = 1,
+                 tick: float | None = None, **options):
         super().__init__(profile, firmware, **options)
         self.center = profile.upgrade_center
         self.reboots = reboots
@@ -233,6 +235,22 @@ class SimulatedM4T(SimulatedDrone):
         self.end_status = end_status or {}
         self.stop_after_files = stop_after_files
         self.mute_progress = mute_progress
+        #: (file number, chunk) pairs lost on the way, once each, or as many
+        #: times as a mapping says. The device never sees a lost chunk: it
+        #: learns of the gap when a later chunk arrives, and then reports the
+        #: gap instead of progress, as in Assistant's capture.
+        self.lose = Counter(lose)
+        self.lost: list[tuple[int, int]] = []
+        self.resent: list[tuple[int, int]] = []
+        self.duplicates: list[tuple[int, int]] = []
+        #: Reports per read: the device's timer keeps reporting while the host
+        #: writes, so several can wait to be read at once.
+        self.repeat_reports = repeat_reports
+        #: Seconds between reports even when nothing changed, like the real
+        #: device's ~100 ms timer; None reports only on change.
+        self.tick = tick
+        self._reported_at = 0.0
+        self._opened = -1
         #: Largest distance between a received chunk and the last progress report.
         self.max_ahead = 0
         self.prepared = False
@@ -277,11 +295,26 @@ class SimulatedM4T(SimulatedDrone):
             link.out += Frame(self.center, self.profile.host, self._seq, commands.GENERAL,
                               cmd_id, block, ack=AckType.AFTER_EXEC).encode()
 
-    def _progress(self, link: _Link, index: int) -> None:
+    def _progress(self, link: _Link, index: int, gap: tuple[int, int] | None = None) -> None:
+        """A progress report, or with ``gap`` (first missing, count) the gap
+        report the device sends in its place."""
         self._center_seq += 1
+        body = b"\x00" + index.to_bytes(4, "little")
+        if gap is not None:
+            body += gap[0].to_bytes(4, "little") + gap[1].to_bytes(4, "little")
         link.out += Frame(self.center, self.profile.host, self._center_seq, commands.GENERAL,
-                          commands.FILE_TRANSFER, b"\x00" + index.to_bytes(4, "little"),
-                          response=True, ack=AckType.NONE).encode()
+                          commands.FILE_TRANSFER, body, response=True,
+                          ack=AckType.NONE).encode()
+
+    def _gap(self) -> tuple[int, int] | None:
+        missing = self._open[5]
+        if not missing:
+            return None
+        first = min(missing)
+        count = 1
+        while first + count in missing:
+            count += 1
+        return first, count
 
     def handle(self, link: _Link, frame: Frame) -> None:
         if frame.receiver == self.center and frame.cmd_set == commands.GENERAL:
@@ -340,28 +373,49 @@ class SimulatedM4T(SimulatedDrone):
                 self.errors.append("open out of order")
             size = int.from_bytes(payload[1:5], "little")
             name = payload[6:5 + payload[5]].decode("ascii")
-            self._open = [name, size, bytearray(), -1, -1]
+            # name, size, chunks by index, highest, last reported, missing,
+            # a report due because a gap opened or a missing chunk arrived
+            self._open = [name, size, {}, -1, -1, set(), False]
+            self._opened += 1
             self._answer(link, frame, bytes.fromhex("00d40388130101"))
         elif payload[0] == commands.FT_DATA:
             if self._open is None:
                 self.errors.append("data without an open file")
                 return
-            name, size, data, highest, reported = self._open
+            name, size, chunks, highest, reported, missing = self._open[:6]
             index = int.from_bytes(payload[1:5], "little")
-            if index != highest + 1:
-                self.errors.append(f"{name}: chunk {index} after {highest}")
+            key = (self._opened, index)
+            if self.lose[key] > 0:
+                self.lose[key] -= 1
+                self.lost.append(key)
                 return
-            data += payload[5:]
+            if index in missing:
+                missing.discard(index)
+                chunks[index] = payload[5:]
+                self.resent.append(key)
+                self._open[6] = True  # the next timer report tells what is still missing
+                return
+            if index <= highest:
+                self.duplicates.append(key)
+                self.errors.append(f"{name}: chunk {index} again after {highest}")
+                return
+            if index > highest + 1:
+                missing.update(range(highest + 1, index))
+                self._open[6] = True
             self._open[3] = index
             self.max_ahead = max(self.max_ahead, index - reported)
+            chunks[index] = payload[5:]
         elif payload[0] == commands.FT_END:
             if self._open is None:
                 self.errors.append("end without an open file")
                 return
-            name, size, data, highest = self._open[:4]
+            name, size, chunks, highest = self._open[:4]
             if not self.mute_progress:
-                self._progress(link, highest)  # stale by the time the host reads it
-            good = len(data) == size and hashlib.md5(data).digest() == payload[1:17]
+                # Stale by the time the host reads it.
+                self._progress(link, highest, self._gap())
+            data = b"".join(chunks[index] for index in sorted(chunks))
+            good = (not self._open[5] and len(data) == size
+                    and hashlib.md5(data).digest() == payload[1:17])
             status = self.end_status.get(name, 0 if good else 0xE1)
             self._answer(link, frame, bytes([status]))
             self._open = None
@@ -373,11 +427,20 @@ class SimulatedM4T(SimulatedDrone):
     def on_read(self, link: _Link) -> None:
         if self._open is None or self.mute_progress:
             return
-        _, size, data, highest, reported = self._open
-        if highest > reported and (highest - reported >= self.progress_every
-                                   or len(data) >= size):
-            self._open[4] = highest
-            self._progress(link, highest)
+        _, size, _, highest, reported, missing, changed = self._open
+        if highest < 0:
+            return  # no chunk yet, nothing to report
+        sent_all = (highest + 1) * 980 >= size
+        now = time.monotonic()
+        timer = self.tick is not None and now - self._reported_at >= self.tick
+        if changed or missing or timer or highest - reported >= self.progress_every \
+                or (sent_all and highest > reported):
+            # While chunks are missing a gap report takes the place of the
+            # progress report; a new gap or a chunk sent again gets a report
+            # on the device's next ~100 ms tick.
+            self._open[4], self._open[6], self._reported_at = highest, False, now
+            for _ in range(self.repeat_reports):
+                self._progress(link, highest, self._gap())
 
     def _install(self, link: _Link) -> None:
         sent = sum(len(data) for data in self.files.values())

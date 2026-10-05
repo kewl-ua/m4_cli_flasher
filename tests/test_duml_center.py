@@ -1,6 +1,7 @@
 """The upgrade-center procedure (DJI Assistant's, for the M4T) on SimulatedM4T."""
 import hashlib
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -69,6 +70,8 @@ class CenterTests(unittest.TestCase):
                 # One full greeting at the start and one after every reboot.
                 self.assertEqual(drone.greeted, 4 * (1 + reboots))
                 self.assertIn(Stage.REBOOT, self.stages)
+                # After Complete only the version is read back: not a reboot.
+                self.assertEqual(self.stages[-2:], [Stage.CONFIRM, Stage.DONE])
 
     def test_offline_zip_is_sent_like_assistant_sends_it(self):
         self.package = inspect_package(make_zip(self.directory.name, "offline.zip",
@@ -206,6 +209,87 @@ class CenterTests(unittest.TestCase):
         self.assertLessEqual(drone.max_ahead, 10)
         self.assertEqual(drone.files["wa345t_0802_v10.00.21.17_20260529.ar0.pro.fw.sig"], second)
 
+    def lossy_flash(self, label, lose, **options):
+        drone = SimulatedM4T(M4T, CURRENT, image_version=TARGET,
+                             progress_every=options.pop("progress_every", 4), lose=lose,
+                             tick=0.005, **options)
+        path = Path(self.directory.name) / f"{label}.jsonl"
+        with patch("dji_duml.flasher.TAIL_WAIT", 0.03), \
+                patch("dji_duml.flasher.RESEND_RETRY", 0.03), Journal(path) as journal:
+            result = self.flash(drone, journal=journal)
+        self.assertEqual(str(result.installed), TARGET)
+        self.assertEqual(drone.errors, [])
+        self.assertEqual(drone.duplicates, [])
+        self.assertEqual(drone.files[module_name()], MODULE_DATA)
+        return drone, path.read_text()
+
+    def test_lost_chunks_are_sent_again_as_assistant_does(self):
+        # Assistant's 2026-10-05 capture: the device twice reported one chunk
+        # missing in place of a progress report, and Assistant sent it again.
+        # The device learns of a gap when a later chunk arrives.
+        config_chunks = -(-self.package.files[0].size // 980)
+        cases = {"mid-file": {(1, 5)}, "configuration": {(0, 0)},
+                 "two in a row": {(1, 3), (1, 4)}, "two gaps": {(1, 2), (1, 9)},
+                 "every other": {(1, index) for index in range(0, 20, 2)}}
+        for label, lose in cases.items():
+            with self.subTest(label):
+                drone, journal = self.lossy_flash(label, lose)
+                self.assertEqual(sorted(drone.lost), sorted(lose))
+                self.assertEqual(sorted(drone.resent), sorted(lose))
+                self.assertIn('"chunks-resent"', journal)
+        # Nothing follows a lost last chunk, so the device cannot report it:
+        # the tail goes again once the report stays short of the end.
+        for label, lose in {"last chunk": {(1, 20)}, "last two": {(1, 19), (1, 20)},
+                            "configuration's last": {(0, config_chunks - 1)}}.items():
+            with self.subTest(label):
+                drone, journal = self.lossy_flash(label, lose)
+                self.assertEqual(sorted(drone.lost), sorted(lose))
+                self.assertIn('"tail": true', journal)
+
+    def test_a_chunk_lost_again_is_sent_once_more(self):
+        drone, _ = self.lossy_flash("twice", {(1, 5): 2, (1, 20): 2})
+        self.assertEqual(drone.lost.count((1, 5)), 2)
+        self.assertEqual(drone.resent, [(1, 5)])
+
+    def test_reports_read_in_a_burst_get_one_resend(self):
+        drone, _ = self.lossy_flash("burst", {(1, 5)}, repeat_reports=6)
+        self.assertEqual(drone.resent, [(1, 5)])
+
+    def test_loss_at_the_edge_of_the_window(self):
+        with patch("dji_duml.flasher.WINDOW", 10):
+            drone, _ = self.lossy_flash("window", {(1, 9), (1, 10), (1, 11)})
+        self.assertLessEqual(drone.max_ahead, 13)
+
+    def test_chunks_no_longer_kept_are_read_from_the_package_again(self):
+        for kind in ("tar", "zip"):
+            with self.subTest(kind):
+                if kind == "zip":
+                    self.package = inspect_package(make_zip(self.directory.name, "offline.zip",
+                                                            content=manifest()))
+                with patch("dji_duml.flasher.RESEND_BUFFER", 2):
+                    _, journal = self.lossy_flash(kind, {(1, 5)})
+                self.assertIn('"reread": true', journal)
+
+    def test_a_gap_that_never_fills_stops_like_any_stall(self):
+        drone = SimulatedM4T(M4T, CURRENT, image_version=TARGET, progress_every=4,
+                             lose={(1, 5): 10 ** 6})
+        started = time.monotonic()
+        with patch("dji_duml.flasher.RESEND_RETRY", 0.01), \
+                self.assertRaisesRegex(FlashAborted, "stopped acknowledging"):
+            self.flash(drone)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertNotIn(commands.UPGRADE_INSTALL, self.center_commands(drone))
+
+    def test_gap_report_for_chunks_never_sent_aborts(self):
+        from dji_duml.flasher import _Resend
+        flasher = Flasher(lambda: None, M4T)
+        resend = _Resend(self.package, module_name(), module_name(), 980)
+        with self.assertRaisesRegex(FlashAborted, "asks for chunks 50\\+1"):
+            flasher._send_again(None, (10, 50, 1), 20, module_name(), resend, 0.0)
+        gap = b"\x00" + (10).to_bytes(4, "little") + (50).to_bytes(4, "little") \
+            + (1).to_bytes(4, "little")
+        self.assertEqual(commands.parse_file_gap(gap), (10, 50, 1))
+
     def test_unreadable_package_after_announce_is_not_started(self):
         drone = SimulatedM4T(M4T, CURRENT, image_version=TARGET)
         real = __import__("dji_duml.package", fromlist=["open_file"]).open_file
@@ -219,6 +303,20 @@ class CenterTests(unittest.TestCase):
                 self.assertRaisesRegex(FlashAborted, "OSError.*not started"):
             self.flash(drone)
         self.assertNotIn(commands.UPGRADE_INSTALL, self.center_commands(drone))
+
+    def test_package_error_during_transfer_is_an_abort(self):
+        from dji_duml.errors import PackageError
+        drone = SimulatedM4T(M4T, CURRENT, image_version=TARGET)
+        real = __import__("dji_duml.package", fromlist=["open_file"]).open_file
+
+        def failing(package, name):
+            if name == module_name():
+                raise PackageError("Cannot read the module from the package.")
+            return real(package, name)
+
+        with patch("dji_duml.flasher.open_file", failing), \
+                self.assertRaisesRegex(FlashAborted, "PackageError.*not started"):
+            self.flash(drone)
 
     def test_rejected_open_is_reported_at_once(self):
         drone = SimulatedM4T(M4T, CURRENT, reject={commands.FILE_TRANSFER: 0xE3})

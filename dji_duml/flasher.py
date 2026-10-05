@@ -31,6 +31,7 @@ import os
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -59,6 +60,20 @@ REMOTE_PATH = "/upgrade/dji_system.bin"
 WINDOW = 1250
 #: Data chunks per send_batch call (about 64 KB).
 BATCH = 64
+#: Chunks kept in memory to send again when the device reports a gap (about
+#: 5 MB); older ones are read from the package again.
+RESEND_BUFFER = 4 * WINDOW
+#: Chunks one file may need again before the transfer is given up.
+RESEND_LIMIT = 4096
+#: Seconds before a chunk sent again and still reported missing goes once more,
+#: when no later chunk shows that the device got past it (a stall of 0.95 s
+#: was captured).
+RESEND_RETRY = 1.0
+#: The device cannot report a lost last chunk: nothing follows it. When its
+#: reports (on its ~100 ms timer, at least two) stay this many seconds within
+#: TAIL_LIMIT chunks of the end of the file, those chunks go again, in order.
+TAIL_WAIT = 2.0
+TAIL_LIMIT = 8
 #: Module 0x1F still starting after a reboot reports firmware 00.00.0000.
 NOT_READY = FirmwareVersion(0, 0, 0)
 
@@ -72,6 +87,7 @@ class Stage(str, Enum):
     USER_CONFIRM = "user-confirm"
     UPGRADING = "upgrading"
     REBOOT = "reboot"
+    CONFIRM = "confirm"  # the device reported completion; reading its version
     DONE = "done"
 
 
@@ -91,6 +107,62 @@ class _Early:
     heard: bool = False
     failure: commands.UpgradeStatus | None = None
     foreign: int = 0  # statuses from other modules
+
+
+class _Resend:
+    """The data chunks of the open file sent most recently, to send again when
+    the device reports them missing; older ones are read from the package."""
+
+    def __init__(self, package: PackageInfo, member: str, name: str, chunk: int):
+        self.package, self.member, self.name, self.chunk = package, member, name, chunk
+        self.count = 0  # chunks sent again so far
+        self._kept: dict[int, bytes] = {}
+        self._order: deque[int] = deque()
+        #: chunk -> (last chunk sent before it went again, when), until a
+        #: plain report shows nothing is missing
+        self._again: dict[int, tuple[int, float]] = {}
+
+    def keep(self, index: int, payload: bytes) -> None:
+        self._kept[index] = payload
+        self._order.append(index)
+        if len(self._order) > RESEND_BUFFER:
+            del self._kept[self._order.popleft()]
+
+    def due(self, first: int, count: int, highest: int, now: float) -> list[int]:
+        """Chunks of a gap report to send now. One already sent again counts
+        only once the device got past it (``highest`` beyond the chunk sent
+        before it) or RESEND_RETRY passed: reports read in a burst, or made
+        before the device reached the resend, still name it."""
+        due = []
+        for index in range(first, first + count):
+            mark, at = self._again.get(index, (None, 0.0))
+            if mark is None or highest > mark or now - at >= RESEND_RETRY:
+                due.append(index)
+        return due
+
+    def sent(self, indexes: list[int], last_sent: int, now: float) -> None:
+        self.count += len(indexes)
+        for index in indexes:
+            self._again[index] = (last_sent, now)
+
+    def settled(self) -> None:
+        """A plain report: the device is missing nothing."""
+        self._again.clear()
+
+    def payloads(self, indexes: list[int]) -> tuple[list[bytes], bool]:
+        """Data payloads of these chunks, and whether any had to be read from
+        the package again."""
+        reread = {index: None for index in indexes if index not in self._kept}
+        if reread:
+            with open_file(self.package, self.member) as handle:
+                for index in reread:
+                    handle.seek(index * self.chunk)
+                    block = handle.read(self.chunk)
+                    if not block:
+                        raise FlashAborted(f"Chunk {index} of {self.name} is past its end. "
+                                           "Flashing was not started.")
+                    reread[index] = commands.file_data_payload(index, block)
+        return [self._kept.get(index) or reread[index] for index in indexes], bool(reread)
 
 
 @dataclass(frozen=True)
@@ -305,7 +377,12 @@ class Flasher:
         self._last = progress
         self.journal.event("progress", stage=stage.value, percent=percent, detail=detail)
         if self.on_progress is not None:
-            self.on_progress(progress)
+            try:
+                self.on_progress(progress)
+            except Exception as exc:
+                # A broken console (a closed pipe, say) must not stop a flash.
+                self.journal.event("progress-display-failed", text=repr(exc))
+                self.on_progress = None
 
     def check(self, package: PackageInfo, target: FirmwareVersion, *, procedure: str,
               accept_unverified: bool) -> None:
@@ -642,8 +719,10 @@ class Flasher:
                              commands.UPGRADE_REPORT, b"\x00")
         # Progress reports (~10/s) and the device's 81/82 requests (2/s) are
         # counted, not journaled one by one.
+        # Gap reports are rare and the evidence for a failed end: journal each.
         client.journal_rx = lambda frame: (
-            frame.cmd_set == commands.GENERAL and not self._is_progress(frame)
+            frame.cmd_set == commands.GENERAL
+            and not (self._is_progress(frame) and len(frame.payload) == 5)
             and frame.cmd_id not in (commands.CENTER_INFO, commands.CENTER_STATE))
 
     def _greet(self, client) -> None:
@@ -698,10 +777,11 @@ class Flasher:
             ) from exc
         try:
             self._send_files(client, package)
-        except DumlError:
+        except (FlashAborted, FlashFailed, FlashOutcomeUnknown, FlashRefused):
             raise
         except Exception as exc:
-            # Package read errors and the like: nothing was installed yet.
+            # Package read errors (PackageError too) and the like: upgrade mode
+            # was entered, nothing was installed yet.
             raise FlashAborted(
                 f"Transfer stopped ({type(exc).__name__}: {exc}). Flashing was not started. "
                 "Power-cycle the device before another attempt."
@@ -732,14 +812,17 @@ class Flasher:
                 self._abort_on_failure_push(frame)
             digest = hashlib.md5()
             index, progress, batch = 0, -1, []
+            resend = _Resend(package, item.name, name, chunk)
             with open_file(package, item.name) as handle:
                 while block := handle.read(chunk):
                     if index > progress + WINDOW:
                         self._flush(client, batch)
                         batch = []
                         progress = self._await_progress(client, progress, index - WINDOW,
-                                                        index - 1, name)
-                    batch.append(commands.file_data_payload(index, block))
+                                                        index - 1, name, resend)
+                    payload = commands.file_data_payload(index, block)
+                    batch.append(payload)
+                    resend.keep(index, payload)
                     digest.update(block)
                     index += 1
                     done += len(block)
@@ -749,7 +832,10 @@ class Flasher:
                         self._report(Stage.TRANSFER, min(99, done * 100 // total))
             self._flush(client, batch)
             if index:
-                self._await_progress(client, progress, index - 1, index - 1, name)
+                # The device sends a gap report in place of a progress report,
+                # so the end goes out only after a plain report of the last
+                # chunk that came after everything sent again.
+                self._await_progress(client, progress, index - 1, index - 1, name, resend)
             if digest.digest() != self._digests.get(item.name) or not package.unchanged():
                 raise FlashAborted(
                     f"{item.name!r} changed after it was verified. Flashing was not started. "
@@ -782,9 +868,10 @@ class Flasher:
             ) from exc
 
     def _is_progress(self, frame: Frame) -> bool:
+        """A progress report, or the gap report the device sends in its place."""
         return (frame.response and frame.sender == self.profile.upgrade_center
                 and frame.cmd_set == commands.GENERAL
-                and frame.cmd_id == commands.FILE_TRANSFER and len(frame.payload) == 5)
+                and frame.cmd_id == commands.FILE_TRANSFER and len(frame.payload) in (5, 13))
 
     def _drop_progress(self, client) -> None:
         if any(self._is_progress(frame) for frame in client.inbox):
@@ -793,39 +880,109 @@ class Flasher:
             client.inbox.extend(kept)
 
     def _await_progress(self, client, progress: int, need: int, last_sent: int,
-                        name: str) -> int:
+                        name: str, resend: "_Resend | None" = None) -> int:
         """Read until the device reports chunk ``need`` of the open file. The
         reports come on a ~100 ms timer; a stall of command_timeout aborts. A
-        report beyond ``last_sent`` cannot be about this file and is ignored."""
-        stalled = time.monotonic() + self.command_timeout
+        report beyond ``last_sent`` cannot be about this file and is ignored.
+        A gap report gets the missing chunks sent again at once, as Assistant
+        does; only a plain report counts as progress. Of the reports read
+        together only the newest counts: they queue up while the host writes."""
+        stalled = moved = time.monotonic()
+        stalled += self.command_timeout
+        last_gap, steady = None, 0  # steady: plain reports of ``progress`` since ``moved``
         while progress < need:
-            if time.monotonic() > stalled:
+            now = time.monotonic()
+            if now > stalled:
                 raise FlashAborted(
                     f"The upgrade center stopped acknowledging {name} at chunk {progress}. "
                     "Flashing was not started. Power-cycle the device before another attempt."
                 )
+            if (resend is not None and need == last_sent and now - moved >= TAIL_WAIT
+                    and steady >= 2 and last_sent - progress <= TAIL_LIMIT):
+                self._send_tail(client, progress, last_sent, name, resend, now)
+                moved, steady = now, 0
             try:
                 frames = client.poll(min(self.poll_interval, 0.05))
             except TransportError as exc:
                 raise FlashAborted(
                     f"USB link lost during transfer: {exc} Flashing was not started."
                 ) from exc
+            report = None
             for frame in frames:
                 self._abort_on_failure_push(frame)
                 if self._is_progress(frame):
-                    try:
-                        reported = commands.parse_file_progress(frame.payload)
-                    except UnexpectedReply as exc:
-                        self.journal.event("progress-unparsed", text=str(exc))
-                        continue
-                    if reported > last_sent:
-                        self.journal.event("progress-ignored", file=name, reported=reported,
-                                           sent=last_sent)
-                        continue
-                    if reported > progress:
-                        progress = reported
-                        stalled = time.monotonic() + self.command_timeout
+                    report = frame.payload
+            if report is None:
+                continue
+            now = time.monotonic()
+            if len(report) == 13:
+                try:
+                    gap = commands.parse_file_gap(report)
+                except UnexpectedReply as exc:
+                    self.journal.event("gap-unparsed", text=str(exc))
+                    continue
+                if gap != last_gap:
+                    # A new gap is the device talking; the same one again is not.
+                    last_gap, moved, stalled = gap, now, now + self.command_timeout
+                self._send_again(client, gap, last_sent, name, resend, now)
+                continue
+            try:
+                reported = commands.parse_file_progress(report)
+            except UnexpectedReply as exc:
+                self.journal.event("progress-unparsed", text=str(exc))
+                continue
+            if reported > last_sent:
+                self.journal.event("progress-ignored", file=name, reported=reported,
+                                   sent=last_sent)
+                continue
+            last_gap = None
+            if resend is not None:
+                resend.settled()
+            if reported > progress:
+                progress, moved, stalled = reported, now, now + self.command_timeout
+                steady = 0
+            elif reported == progress:
+                steady += 1
         return progress
+
+    def _send_again(self, client, gap: tuple[int, int, int], last_sent: int, name: str,
+                    resend: "_Resend | None", now: float) -> None:
+        highest, first, count = gap
+        if highest > last_sent:
+            self.journal.event("gap-ignored", file=name, highest=highest, first=first,
+                               count=count, sent=last_sent)
+            return
+        if resend is None or count < 1 or first + count - 1 > last_sent:
+            raise FlashAborted(
+                f"The upgrade center asks for chunks {first}+{count} of {name}, which "
+                f"cannot be right (highest received {highest}, sent {last_sent}). Flashing "
+                "was not started. Power-cycle the device before another attempt."
+            )
+        due = resend.due(first, count, highest, now)
+        if due:
+            self._resend(client, due, last_sent, name, resend, now, highest=highest)
+
+    def _send_tail(self, client, progress: int, last_sent: int, name: str,
+                   resend: "_Resend", now: float) -> None:
+        """The device stays just short of the end of the file: its last
+        chunks may have been lost, which it cannot see. They go again in
+        order, so the device can only take them as normal data."""
+        self._resend(client, list(range(progress + 1, last_sent + 1)), last_sent, name,
+                     resend, now, tail=True)
+
+    def _resend(self, client, indexes: list[int], last_sent: int, name: str,
+                resend: "_Resend", now: float, **detail) -> None:
+        if resend.count + len(indexes) > RESEND_LIMIT:
+            raise FlashAborted(
+                f"The upgrade center kept reporting chunks of {name} missing after "
+                f"{resend.count} were sent again. Flashing was not started. Power-cycle "
+                "the device before another attempt."
+            )
+        payloads, reread = resend.payloads(indexes)
+        self._flush(client, payloads)
+        resend.sent(indexes, last_sent, now)
+        self.journal.event("chunks-resent", file=name, first=indexes[0], count=len(indexes),
+                           reread=reread, **detail)
 
     def _center_install(self, client) -> tuple[bool, _Early]:
         """00/85 starts the installation; Assistant saw the reply 06. M4T
@@ -1016,7 +1173,7 @@ class Flasher:
     def _confirm(self, target, previous, completion: bool, acknowledged: bool,
                  deadline: float) -> FirmwareVersion:
         """Reconnect after the reboot and read the installed version."""
-        self._report(Stage.REBOOT)
+        self._report(Stage.CONFIRM if completion else Stage.REBOOT)
         if previous == target and not completion:
             raise FlashOutcomeUnknown(
                 "Same-version reflash: the device did not report completion, and the "

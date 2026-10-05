@@ -173,6 +173,17 @@ def parse_file_progress(payload: bytes) -> int:
     return int.from_bytes(payload[1:5], "little")
 
 
+def parse_file_gap(payload: bytes) -> tuple[int, int, int]:
+    """The report the device sends instead of a progress report when it is
+    missing chunks of the open file: (highest chunk received, first missing,
+    count). Seen twice in Assistant's 2026-10-05 capture, each time for one
+    chunk, which Assistant sent again at once."""
+    if len(payload) != 13 or payload[0] != 0:
+        raise UnexpectedReply(f"Not a file transfer gap report: {payload.hex()}")
+    return (int.from_bytes(payload[1:5], "little"), int.from_bytes(payload[5:9], "little"),
+            int.from_bytes(payload[9:13], "little"))
+
+
 def install_payload() -> bytes:
     return bytes(16)
 
