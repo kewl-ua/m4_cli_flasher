@@ -533,3 +533,20 @@ Example:
 The inverse decomposition removes q_mount first and analytically decomposes the
 verified Rz(yaw) * Rx(roll) * Ry(pitch) chain. It is singular at roll +/-90
 degrees, as expected for this Euler parameterization.
+
+
+#### Current M4T reference fit evidence
+
+A later independent 30-second mixed body-motion capture, evaluated with
+bidirectional blocked cross-validation, again selected the same physical model:
+
+- temporal alignment: +30 ms;
+- model: q_relative = q_mount * Rz(yaw) * Rx(roll) * Ry(pitch);
+- held-out orientation error: 2.38 deg median / 8.07 deg maximum;
+- fitted mount Euler: approximately (+1.71, -2.77, +0.33) deg.
+
+The next-best blocked-CV candidate was the same joint order with the mount on
+the right side at 3.01 / 8.84 deg, followed by left roll/yaw/pitch at
+3.05 / 10.74 deg. This is strong evidence for the left yaw/roll/pitch model,
+while the numerical mount remains a reference calibration until reproduced on
+another airframe.
