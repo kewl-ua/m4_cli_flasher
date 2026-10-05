@@ -48,6 +48,14 @@ class GimbalKinematicsTests(unittest.TestCase):
             1e-6,
         )
 
+    def test_inverse_solver_recovers_joint_angles(self):
+        item = self.sample(pitch=22.0, roll=-11.0, yaw=37.0)
+        kin = GimbalKinematics.from_mount_euler((1.5, -2.5, 0.25))
+        solved = kin.solve_joint_angles_deg(kin.relative_orientation(item))
+        expected = (item.pitch_joint_deg, item.roll_joint_deg, item.relative_yaw_deg)
+        for actual, wanted in zip(solved, expected):
+            self.assertAlmostEqual(actual, wanted, places=6)
+
     def test_forward_world_orientation_matches_measured_quaternion(self):
         item = self.sample(pitch=-15.0, roll=8.0, yaw=25.0)
         kin = GimbalKinematics.from_mount_euler((1.5, -2.5, 0.25))
@@ -55,6 +63,17 @@ class GimbalKinematicsTests(unittest.TestCase):
         measured = kin.world_orientation(fc, item)
         item = replace(item, quaternion_wxyz=measured)
         self.assertLess(kin.orientation_error_deg(fc, item), 1e-6)
+
+    def test_measured_joint_solver_matches_packet_fields(self):
+        item = self.sample(pitch=-18.0, roll=7.0, yaw=-31.0)
+        kin = GimbalKinematics.from_mount_euler((1.5, -2.5, 0.25))
+        fc = (14.0, 9.0, -75.0)
+        measured = kin.world_orientation(fc, item)
+        item = replace(item, quaternion_wxyz=measured)
+        solved = kin.measured_joint_angles_deg(fc, item)
+        expected = (item.pitch_joint_deg, item.roll_joint_deg, item.relative_yaw_deg)
+        for actual, wanted in zip(solved, expected):
+            self.assertAlmostEqual(actual, wanted, places=6)
 
     def test_m4t_reference_preset_metadata(self):
         kin = M4T_REFERENCE_GIMBAL_KINEMATICS
