@@ -66,6 +66,71 @@ class FlycOsdGeneral:
         )
 
 
+def euler_deg_to_quaternion(
+    attitude_deg: tuple[float, float, float],
+) -> tuple[float, float, float, float]:
+    """Convert (pitch, roll, yaw) degrees to a normalized w,x,y,z quaternion."""
+    pitch, roll, yaw = (math.radians(value) for value in attitude_deg)
+    cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
+    cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
+    cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+    q = (
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    )
+    norm = sum(value * value for value in q) ** 0.5
+    return tuple(value / norm for value in q)
+
+
+def quaternion_conjugate(
+    quaternion: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    w, x, y, z = quaternion
+    return w, -x, -y, -z
+
+
+def quaternion_multiply(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    lw, lx, ly, lz = left
+    rw, rx, ry, rz = right
+    return (
+        lw * rw - lx * rx - ly * ry - lz * rz,
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+    )
+
+
+def quaternion_to_euler_deg(
+    quaternion: tuple[float, float, float, float],
+) -> tuple[float, float, float]:
+    """Convert a w,x,y,z quaternion to (pitch, roll, yaw) degrees."""
+    w, x, y, z = quaternion
+    roll = math.degrees(math.atan2(
+        2.0 * (w * x + y * z),
+        1.0 - 2.0 * (x * x + y * y),
+    ))
+    sin_pitch = 2.0 * (w * y - z * x)
+    pitch = math.degrees(math.asin(max(-1.0, min(1.0, sin_pitch))))
+    yaw = math.degrees(math.atan2(
+        2.0 * (w * z + x * y),
+        1.0 - 2.0 * (y * y + z * z),
+    ))
+    return pitch, roll, yaw
+
+
+def relative_quaternion(
+    parent_world: tuple[float, float, float, float],
+    child_world: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    """Return child orientation expressed in the parent frame."""
+    return quaternion_multiply(quaternion_conjugate(parent_world), child_world)
+
+
 _OSD_PREFIX = struct.Struct("<ddhhhhhhhBBI")
 
 
@@ -174,18 +239,7 @@ class GimbalParams:
         """
         if self.quaternion_wxyz is None:
             return None
-        w, x, y, z = self.quaternion_wxyz
-        roll = math.degrees(math.atan2(
-            2.0 * (w * x + y * z),
-            1.0 - 2.0 * (x * x + y * y),
-        ))
-        sin_pitch = 2.0 * (w * y - z * x)
-        pitch = math.degrees(math.asin(max(-1.0, min(1.0, sin_pitch))))
-        yaw = math.degrees(math.atan2(
-            2.0 * (w * z + x * y),
-            1.0 - 2.0 * (y * y + z * z),
-        ))
-        return pitch, roll, yaw
+        return quaternion_to_euler_deg(self.quaternion_wxyz)
 
     @property
     def quaternion_orientation_error_deg(self) -> float | None:
@@ -196,16 +250,7 @@ class GimbalParams:
         """
         if self.quaternion_wxyz is None:
             return None
-        pitch, roll, yaw = (math.radians(value) for value in self.attitude_deg)
-        cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
-        cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
-        cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
-        legacy_q = (
-            cr * cp * cy + sr * sp * sy,
-            sr * cp * cy - cr * sp * sy,
-            cr * sp * cy + sr * cp * sy,
-            cr * cp * sy - sr * sp * cy,
-        )
+        legacy_q = euler_deg_to_quaternion(self.attitude_deg)
         q = self.quaternion_wxyz
         q_norm = sum(value * value for value in q) ** 0.5
         legacy_norm = sum(value * value for value in legacy_q) ** 0.5
