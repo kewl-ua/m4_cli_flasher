@@ -37,6 +37,7 @@ class GimbalParamsTests(unittest.TestCase):
         self.assertEqual(item.limit_flags, 0)
         self.assertEqual(item.version_flags, 1)
         self.assertEqual(item.middle, self.STATIONARY[12:24])
+        self.assertEqual(item.timestamp_ms, int.from_bytes(self.STATIONARY[12:16], "little"))
         self.assertEqual(item.tail, bytes(9))
         self.assertAlmostEqual(item.quaternion_norm, 1.0, places=5)
         q_pitch, q_roll, q_yaw = item.quaternion_euler_deg
@@ -75,6 +76,7 @@ class GimbalParamsTests(unittest.TestCase):
     def test_short_payload_keeps_unverified_extension_opaque(self):
         payload = self.STATIONARY[:12]
         item = parse_gimbal_params(payload)
+        self.assertIsNone(item.timestamp_ms)
         self.assertIsNone(item.quaternion_wxyz)
         self.assertEqual(item.middle, b"")
         self.assertEqual(item.tail, b"")
