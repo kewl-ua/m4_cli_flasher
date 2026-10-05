@@ -689,3 +689,27 @@ best correlation is below the general 0.80 promotion/report threshold:
 This preserves weak or noisy evidence during calibration runs instead of
 silently suppressing it. The ordinary tail-body-rate-fit output remains
 thresholded to avoid flooding the report with poor generic candidates.
+
+
+### Two-speed yaw-rate calibration
+
+Two clean yaw-only M4T captures now independently support Unknown35@0x35 as
+a yaw-rate-related field:
+
+- faster yaw: motion purity 0.973, i16@0x35 -> omega_z correlation +0.877,
+  lag 0 samples, scale +0.06828 deg/s per raw unit, bias +1.02 deg/s,
+  RMSE 6.66 deg/s;
+- slower yaw: motion purity 0.978, i16@0x35 -> omega_z correlation +0.830,
+  lag 0 samples, scale +0.07355 deg/s per raw unit, bias -0.01 deg/s,
+  RMSE 2.47 deg/s.
+
+The association with yaw rate is now strong, but the scale differs by about
+8 percent between runs. Since the reference omega_z is derived from the
+orientation delta between ~2 Hz FLYC samples, it represents an interval-average
+body rate, whereas Unknown35 may be an instantaneous or differently filtered
+rate estimate. The decoder therefore still keeps the field untyped.
+
+Verbose diagnostics now additionally compare previous-sample, current-sample,
+and trapezoidal raw35 interval models. This is intended to distinguish sample
+timing/filtering effects from a genuinely variable scale before semantic
+promotion.
