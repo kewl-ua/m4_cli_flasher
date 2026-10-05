@@ -46,6 +46,25 @@ class CliTests(unittest.TestCase):
         code, out, _ = run("--simulate", CURRENT, "version")
         self.assertEqual(code, 0)
         self.assertIn(f"firmware  {CURRENT}", out)
+        self.assertIn("info      NAVI wa345", out)  # 00/FF device-info string
+        code, out, _ = run("--simulate", CURRENT, "version", "--json")
+        self.assertIn("NAVI wa345", json.loads(out)["device_info"])
+
+    def test_device_info_parse(self):
+        from dji_duml import commands
+        from dji_duml.errors import UnexpectedReply
+        self.assertEqual(commands.parse_device_info(b"NAVI wa345 20200101|000000\x00"),
+                         "NAVI wa345 20200101|000000")  # synthetic; real stamps not committed
+        with self.assertRaises(UnexpectedReply):
+            commands.parse_device_info(b"\xff\xff")
+
+    def test_version_tolerates_missing_device_info(self):
+        from dji_duml.errors import NoReply
+        with patch("dji_duml.commands.get_device_info", side_effect=NoReply("no 00/ff")):
+            code, out, _ = run("--simulate", CURRENT, "version")
+        self.assertEqual(code, 0)  # best effort: version still works without 00/FF
+        self.assertIn(f"firmware  {CURRENT}", out)
+        self.assertNotIn("info      ", out)
 
     def test_flash_needs_yes_and_an_accepted_procedure(self):
         code, _, err = self.flash()

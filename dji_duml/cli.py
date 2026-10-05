@@ -95,13 +95,22 @@ def cmd_version(args, profile) -> int:
     journal = Journal(args.journal)
     with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
         info = commands.get_version(client, profile.target)
+        try:  # best effort: not every device/state answers 00/FF
+            device_info = commands.get_device_info(client, params.FLIGHT_CONTROLLER)
+        except DumlError:
+            device_info = None
     if args.json:
-        _say(json.dumps({"hardware": info.hardware, "firmware": str(info.firmware),
-                         "loader": str(info.loader), "raw": info.raw.hex()}))
+        result = {"hardware": info.hardware, "firmware": str(info.firmware),
+                  "loader": str(info.loader), "raw": info.raw.hex()}
+        if device_info is not None:
+            result["device_info"] = device_info
+        _say(json.dumps(result))
     else:
         _say(f"hardware  {info.hardware}")
         _say(f"firmware  {info.firmware}")
         _say(f"loader    {info.loader}")
+        if device_info is not None:
+            _say(_ascii(f"info      {device_info}"))
         _say(f"raw       {info.raw.hex(' ')}")
         if not profile.matches_hardware(info.hardware):
             _say(f"warning: hardware does not start with {profile.product_code!r}")

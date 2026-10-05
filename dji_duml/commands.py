@@ -16,6 +16,7 @@ from .version import FirmwareVersion
 
 GENERAL = 0x00
 VERSION_INQUIRY = 0x01
+QUERY_DEVICE_INFO = 0xFF
 ENTER_UPGRADE = 0x07
 UPGRADE_DATA_SIZE = 0x08
 UPGRADE_DATA = 0x09
@@ -89,6 +90,26 @@ def get_version(client: DumlClient, target: int, *, timeout: float = 2.0,
     """Read-only and idempotent, so it is the only command that is retried."""
     reply = client.request(target, GENERAL, VERSION_INQUIRY, timeout=timeout, retries=retries)
     return parse_version_reply(reply.payload)
+
+
+def parse_device_info(payload: bytes) -> str:
+    """The device-info string a 00/FF reply carries: product, then a
+    timestamp-like field, e.g. ``NAVI wa345 <YYYYMMDD>|<HHMMSS>``. Two M4Ts on
+    the same aircraft version returned different strings, so it is an FC/NAVI
+    build-or-flash stamp (finer than the package version), and may be specific
+    to the unit -- do not publish it. The reply has no status byte; it is
+    NUL-terminated ASCII."""
+    text = bytes(payload).split(b"\x00", 1)[0]
+    if not text or not all(0x20 <= byte < 0x7F for byte in text):
+        raise UnexpectedReply(f"Device info is not printable ASCII: {payload.hex()}")
+    return text.decode("ascii")
+
+
+def get_device_info(client: DumlClient, target: int, *, timeout: float = 1.0,
+                    retries: int = 1) -> str:
+    """Read a module's 00/FF device-info string. Read-only, so it is retried."""
+    reply = client.request(target, GENERAL, QUERY_DEVICE_INFO, timeout=timeout, retries=retries)
+    return parse_device_info(reply.payload)
 
 
 def require_ok(reply: Frame, command: str) -> None:

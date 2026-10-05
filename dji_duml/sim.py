@@ -217,6 +217,9 @@ def _battery_block(voltage_mv=16600, current_ma=-300, full=6690, remaining=6356,
 #: Default smart-battery data the simulator returns for 0D/02.
 SIM_BATTERY = _battery_block()
 
+#: Default device-info string the simulator returns for 00/FF (NUL-terminated).
+SIM_DEVICE_INFO = b"NAVI wa345 20260101|000000\x00"
+
 
 def _config_for(version: FirmwareVersion, product: str = "wa345t") -> bytes:
     """A configuration as DJI lays it out (IM*H header, readable manifest),
@@ -265,7 +268,8 @@ class SimulatedM4T(SimulatedDrone):
                  mute_progress: bool = False, lose=(), repeat_reports: int = 1,
                  tick: float | None = None, installed_config: bytes | None = None,
                  params: list[tuple] | None = None, require_unlock: bool = False,
-                 ignore_writes=(), battery_data: bytes | None = None, **options):
+                 ignore_writes=(), battery_data: bytes | None = None,
+                 device_info: bytes | None = None, **options):
         super().__init__(profile, firmware, **options)
         self.center = profile.upgrade_center
         #: What 00/4F type 01 returns; by default a manifest of ``firmware``.
@@ -284,6 +288,8 @@ class SimulatedM4T(SimulatedDrone):
         self.writes: list[tuple[int, bytes]] = []
         #: The 45-byte block returned for a 0D/02 battery read.
         self.battery_data = SIM_BATTERY if battery_data is None else battery_data
+        #: The string returned for a 00/FF device-info read.
+        self.device_info = SIM_DEVICE_INFO if device_info is None else device_info
         self.reboots = reboots
         self.zero_version_reads = zero_version_reads
         self.progress_every = progress_every
@@ -404,6 +410,11 @@ class SimulatedM4T(SimulatedDrone):
                 and frame.cmd_id == battery.DYNAMIC_DATA and not frame.response):
             self.received.append(frame)
             self._answer(link, frame, self.battery_data)
+            return
+        if (frame.receiver == FLIGHT_CONTROLLER and frame.cmd_set == commands.GENERAL
+                and frame.cmd_id == commands.QUERY_DEVICE_INFO and not frame.response):
+            self.received.append(frame)
+            self._answer(link, frame, self.device_info)
             return
         super().handle(link, frame)
 
