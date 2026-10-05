@@ -1122,6 +1122,7 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         return slope, intercept, rmse, corr
 
     body_rate_fits = []
+    unknown35_body_rate_fits = []
     for offset in range(start, end - 1):
         if offset in counter_offsets:
             continue
@@ -1177,8 +1178,11 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
                     -abs(best["lag_samples"]),
                 ):
                     best = candidate
-            if best is not None and abs(best["corr"]) >= 0.80:
-                body_rate_fits.append(best)
+            if best is not None:
+                if offset == 0x35 and signal in {"omega_x", "omega_y", "omega_z"}:
+                    unknown35_body_rate_fits.append(best)
+                if abs(best["corr"]) >= 0.80:
+                    body_rate_fits.append(best)
 
     body_rate_fits.sort(
         key=lambda item: (
@@ -1188,6 +1192,33 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
             item["offset"],
             item["signal"],
         )
+    )
+    unknown35_body_rate_fits.sort(
+        key=lambda item: (
+            -abs(item["corr"]),
+            item["rmse"],
+            abs(item["lag_samples"]),
+            item["signal"],
+        )
+    )
+
+    axis_activity = {}
+    for signal in ("omega_x", "omega_y", "omega_z"):
+        samples = [
+            value for value in body_rate_signals[signal]
+            if value is not None
+        ]
+        if samples:
+            axis_activity[signal] = (
+                sum(value * value for value in samples) / len(samples)
+            ) ** 0.5
+        else:
+            axis_activity[signal] = 0.0
+    dominant_axis = max(axis_activity, key=axis_activity.get)
+    activity_total = sum(axis_activity.values())
+    motion_purity = (
+        axis_activity[dominant_axis] / activity_total
+        if activity_total > 0 else 0.0
     )
 
     legacy_continuation_offsets = {
@@ -1245,6 +1276,10 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         "second_rate_correlations": second_rate_correlations[:12],
         "body_rate_correlations": body_rate_correlations[:12],
         "body_rate_fits": body_rate_fits[:12],
+        "unknown35_body_rate_fits": unknown35_body_rate_fits,
+        "motion_axis_rms": axis_activity,
+        "motion_dominant_axis": dominant_axis,
+        "motion_purity": motion_purity,
         "counter_candidates": counter_candidates,
         "categorical_states": categorical_states,
         "legacy_slots": legacy_slots,
