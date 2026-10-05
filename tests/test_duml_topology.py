@@ -51,11 +51,12 @@ class PassiveTopologyTests(unittest.TestCase):
         topology = from_frames([
             Frame(fc, host, 1, 3, 0x43, ack=0),
             Frame(host, gimbal, 2, 4, 0x02),
-        ], host=host)
+        ], host=host, roles={fc: "Primary target"})
         text = report(topology)
-        self.assertIn("+ 0x03  Flight Controller idx=0", text)
+        self.assertIn("+ 0x03  Primary target [Flight Controller] idx=0", text)
         self.assertIn("03/43 x1", text)
         self.assertIn("? 0x24  Gimbal idx=1", text)
+        self.assertEqual(topology.as_dict()["confirmed"][0]["role"], "Primary target")
 
 
 class ActiveTopologyTests(unittest.TestCase):
