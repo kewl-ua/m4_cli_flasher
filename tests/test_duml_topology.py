@@ -129,6 +129,23 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("i16@14=-5..4", text)
         self.assertIn("i16@16=-5..15", text)
 
+    def test_gimbal_rate_correlation_uses_device_timestamp(self):
+        topology = Topology(host=0x2A)
+        # Pitch positions 0, 1, 3, 6 deg at 100 ms steps produce
+        # pitch rates 10, 20, 30 deg/s. Mirror those in opaque i16@14.
+        for seq, (stamp, pitch_tenths, raw14) in enumerate(
+            ((0, 0, 0), (100, 10, 10), (200, 30, 20), (300, 60, 30)), 1
+        ):
+            payload = bytearray(24)
+            payload[0:2] = int(pitch_tenths).to_bytes(2, "little", signed=True)
+            payload[12:16] = int(stamp).to_bytes(4, "little")
+            payload[20:22] = int(raw14).to_bytes(2, "little", signed=True)
+            topology.observe(Frame(0x04, 0x2A, seq, 4, 5, bytes(payload), ack=0),
+                             seq * 0.2)
+        text = report(topology, verbose=True)
+        self.assertIn("rate-corr:", text)
+        self.assertIn("i16@14[pitch=+1.000", text)
+
     def test_report_distinguishes_confirmed_and_candidates(self):
         host = address(10, 1)
         fc = address(3, 0)
