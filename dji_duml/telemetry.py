@@ -100,7 +100,10 @@ class GimbalParams:
     whose norm is consistently ~1.0 and whose w/z pair reproduces the legacy
     yaw on stationary captures, strongly identifying them as a quaternion.
 
-    Bytes 12..23 and 40..end remain opaque until independently verified.
+    Bytes 12..15 are verified on M4T as a millisecond monotonic timestamp:
+    across a stationary 20-second capture they advanced by 19900 while the
+    04/05 stream ran at 10 Hz. Bytes 16..23 and 40..end remain opaque until
+    independently verified.
     """
 
     pitch_tenths: int
@@ -112,6 +115,7 @@ class GimbalParams:
     limit_flags: int
     version_flags: int
     middle: bytes
+    timestamp_ms: int | None
     quaternion_wxyz: tuple[float, float, float, float] | None
     tail: bytes
 
@@ -165,6 +169,8 @@ def parse_gimbal_params(payload: bytes) -> GimbalParams:
         )
 
     prefix = _GIMBAL_PREFIX.unpack_from(payload)
+    timestamp_ms = int.from_bytes(payload[12:16], "little") if len(payload) >= 16 else None
+
     quaternion = None
     if len(payload) >= 40:
         quaternion = _GIMBAL_QUATERNION.unpack_from(payload, 24)
@@ -172,5 +178,5 @@ def parse_gimbal_params(payload: bytes) -> GimbalParams:
     middle_end = 24 if len(payload) >= 24 else len(payload)
     middle = bytes(payload[_GIMBAL_PREFIX.size:middle_end])
     tail = bytes(payload[40:]) if len(payload) >= 40 else bytes(payload[middle_end:])
-    return GimbalParams(*prefix, middle=middle,
+    return GimbalParams(*prefix, middle=middle, timestamp_ms=timestamp_ms,
                         quaternion_wxyz=quaternion, tail=tail)
