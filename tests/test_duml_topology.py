@@ -219,6 +219,7 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("pitch corr=+1.000", text)
         self.assertIn("roll corr=+1.000", text)
         self.assertIn("yaw corr=+1.000", text)
+        self.assertIn("joint-kinematics:", text)
 
 
     def test_report_distinguishes_confirmed_and_candidates(self):
