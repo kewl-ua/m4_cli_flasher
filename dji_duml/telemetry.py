@@ -187,6 +187,30 @@ def quaternion_average(
     return tuple(value / norm for value in summed)
 
 
+def quaternion_rotation_vector_deg(
+    quaternion: tuple[float, float, float, float],
+) -> tuple[float, float, float]:
+    """Return shortest rotation vector (x,y,z) in degrees."""
+    w, x, y, z = quaternion
+    norm = (w * w + x * x + y * y + z * z) ** 0.5
+    if norm <= 0:
+        raise ValueError("zero-norm quaternion")
+    w, x, y, z = (value / norm for value in (w, x, y, z))
+    if w < 0.0:
+        w, x, y, z = -w, -x, -y, -z
+    w = max(-1.0, min(1.0, w))
+    angle = 2.0 * math.acos(w)
+    sin_half = math.sqrt(max(0.0, 1.0 - w * w))
+    if sin_half < 1e-12:
+        return (
+            math.degrees(2.0 * x),
+            math.degrees(2.0 * y),
+            math.degrees(2.0 * z),
+        )
+    scale = math.degrees(angle) / sin_half
+    return x * scale, y * scale, z * scale
+
+
 def quaternion_slerp(
     left: tuple[float, float, float, float],
     right: tuple[float, float, float, float],
