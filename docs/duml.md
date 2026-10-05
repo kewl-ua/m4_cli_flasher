@@ -480,3 +480,18 @@ orientation error.
 The joint-kinematics line ranks all six pitch/roll/yaw multiplication orders
 at the best temporal alignment. A close score between the top candidates is
 treated as unresolved rather than forcing an order.
+
+
+### Mount-transform cross-validation
+
+The kinematic evaluator also tests a constant mounting quaternion around the
+three mechanical joint rotations. For each temporal lag and each of the six
+joint orders it evaluates both:
+
+- q_relative = q_mount * q_joints
+- q_relative = q_joints * q_mount
+
+The constant q_mount is estimated only from alternating training samples and
+scored on the held-out samples. The report prints mount-fit cv-median/max error
+and the best mounting quaternion as Euler angles. This avoids treating a fitted
+constant frame offset as evidence unless it generalizes to unseen samples.
