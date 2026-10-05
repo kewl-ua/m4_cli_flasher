@@ -20,8 +20,9 @@ _CONFIG = re.compile(
     r"(?P<code>[a-z]+\d+[a-z]?)(?:_\d{4}_v(?P<version>\d+\.\d+\.\d+)_\d{8})?(?:\.pro)?\.cfg\.sig"
 )
 _MD5 = re.compile(r"[0-9a-fA-F]{32}")
+_SIZE = re.compile(r"[0-9]{1,12}")  # str.isdigit() also takes "²", which int() rejects
 #: Real M4T configurations are about 25 KiB.
-_CONFIG_LIMIT = 1 << 20
+CONFIG_LIMIT = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ def _safe(name: str) -> bool:
 def _is_config(name: str, size: int) -> bool:
     if not name.endswith(".cfg.sig"):
         return False
-    if size > _CONFIG_LIMIT:
+    if size > CONFIG_LIMIT:
         raise PackageError(f"Configuration {name!r} is {size} bytes, too large for a manifest.")
     return True
 
@@ -148,10 +149,23 @@ def _manifest(data: bytes, code: str, name: str
     for module in releases[0].findall("module"):
         file_name = (module.text or "").strip()
         size, md5 = module.get("size", ""), module.get("md5", "")
-        if not _safe(file_name) or not size.isdigit() or not _MD5.fullmatch(md5):
+        if not _safe(file_name) or not _SIZE.fullmatch(size) or not _MD5.fullmatch(md5):
             raise PackageError(f"Malformed module entry {file_name!r} in the manifest of {name!r}.")
         modules.append(PackageFile(file_name, int(size), bytes.fromhex(md5)))
     return versions.pop(), modules
+
+
+def manifest_files(config_name: str, data: bytes
+                   ) -> tuple[FirmwareVersion | None, list[PackageFile]]:
+    """Version and module files stated by the manifest of a .cfg.sig."""
+    match = _CONFIG.fullmatch(PurePosixPath(config_name).name)
+    if not match:
+        raise PackageError(f"Unrecognised configuration name: {config_name!r}.")
+    version, modules = _manifest(data, match.group("code"), config_name)
+    names = [module.name for module in modules]
+    if len(set(names)) != len(names):
+        raise PackageError(f"The manifest in {config_name!r} lists a module file twice.")
+    return version, modules
 
 
 def _files(config: str, sizes: dict[str, int], modules: list[PackageFile]

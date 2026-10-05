@@ -360,6 +360,51 @@ class CaptureTests(unittest.TestCase):
                           for entry in entries], [(0x04, 5, False), (0x85, 5, True)])
         self.assertAlmostEqual(entries[0].time, 1.0)
 
+    def test_pcapng_with_a_network_interface_too(self):
+        import struct
+
+        def urb(event, endpoint, data):
+            return struct.pack("<QBBBBHbbqiiII8sIIII", 1, ord(event), 3, endpoint, 5, 2, 0, 0,
+                               0, 0, 0, len(data), len(data), bytes(8), 0, 0, 0, 0) + data
+
+        def block(kind, body):
+            body += bytes(-len(body) % 4)
+            total = len(body) + 12
+            return struct.pack("<II", kind, total) + body + struct.pack("<I", total)
+
+        def packet(interface, data):
+            return block(6, struct.pack("<IIIII", interface, 0, 1_000_000, len(data), len(data))
+                         + data)
+
+        header = block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1))
+        ethernet = block(1, struct.pack("<HHI", 1, 0, 65535))
+        path = Path(self.directory.name) / "mixed.pcapng"
+        path.write_bytes(header + ethernet + block(1, struct.pack("<HHI", 220, 0, 65535))
+                         + packet(0, bytes(60)) + packet(1, urb("S", 0x04, self.request))
+                         + packet(0, bytes(60)) + packet(1, urb("C", 0x85, self.reply)))
+        entries, _ = pcap.decode(path)
+        self.assertEqual([entry.frame.response for entry in entries], [False, True])
+        path.write_bytes(header + ethernet + packet(0, bytes(60)))
+        with self.assertRaisesRegex(pcap.CaptureError, "link type 1"):
+            pcap.decode(path)
+
+    def test_classic_pcap_of_another_link_type(self):
+        import struct
+
+        path = Path(self.directory.name) / "net.pcap"
+        path.write_bytes(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
+        with self.assertRaisesRegex(pcap.CaptureError, "link type 1"):
+            pcap.decode(path)
+
+    def test_stats_when_the_reader_stops_early(self):
+        path = self.capture([usbpcap_record(0x85, b"\x99" + self.reply, True),
+                             usbpcap_record(0x85, self.push, True)])
+        stats = pcap.TraceStats()
+        frames = pcap.iter_frames(path, stats=stats)
+        next(frames)
+        frames.close()
+        self.assertEqual(stats.discarded, 1)
+
     def test_truncated_pcapng_option_does_not_crash(self):
         import struct
 

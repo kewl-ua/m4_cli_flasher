@@ -12,6 +12,7 @@ from .client import DumlClient
 from .errors import (
     DumlError, FlashAborted, FlashFailed, FlashOutcomeUnknown, FlashRefused,
 )
+from .extract import REPORT, extract
 from .flasher import LEGACY_FTP, PROCEDURES, Flasher, Progress, Stage, plan
 from .frame import format_address
 from .journal import Journal
@@ -172,6 +173,44 @@ def cmd_decode(args, profile) -> int:
     return 0
 
 
+def _ascii(text: str) -> str:
+    """Text from a capture or manifest, printable on any console."""
+    return text.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def cmd_extract(args, profile) -> int:
+    result = extract(args.capture, args.output, device=args.device)
+    for item in result.files:
+        detail = "; ".join(item.problems) if item.problems else item.manifest
+        _say(_ascii(f"{'ok  ' if item.ok else 'FAIL'} {item.size:>11} "
+                    f"{item.saved_as:<56} {detail}"))
+        for note in item.notes:
+            _say(f"{'':17}note: {note}")
+    for session in result.sessions:
+        where = f"Manifest {session['config']} (USB {session['usb']})"
+        if session["error"]:
+            _say(_ascii(f"{where}: {session['error']}"))
+            continue
+        _say(f"{where}: version {session['version']}")
+        if session["missing"]:
+            _say(_ascii(f"  not in the capture: {', '.join(session['missing'])}"))
+        if session["unlisted"]:
+            _say(_ascii(f"  not in the manifest: {', '.join(session['unlisted'])}"))
+    passed = sum(item.ok for item in result.files)
+    if result.files:
+        _say(f"{len(result.files)} file(s), {passed} passed every check; "
+             f"report: {Path(args.output) / REPORT}")
+    else:
+        _say(f"No file transfers (00/2A) in this capture; report: {Path(args.output) / REPORT}")
+    if not result.ok:
+        _say("NOT a complete, verified set of files: see the report.")
+    stats = result.stats
+    print(f"{stats.frames} frames in {stats.chunks} bulk transfers ({stats.bytes} bytes); "
+          f"{stats.discarded} bytes were not DUML v1; "
+          f"{result.stray_frames} file-transfer frames outside a transfer.", file=sys.stderr)
+    return 0 if result.ok else 2
+
+
 def _progress(progress: Progress) -> None:
     percent = "" if progress.percent is None else f" {progress.percent:3d}%"
     detail = f" {progress.detail}" if progress.detail else ""
@@ -257,6 +296,13 @@ def build_parser() -> argparse.ArgumentParser:
     decode.add_argument("--full", action="store_true", help="do not truncate payloads")
     decode.add_argument("--json", action="store_true")
 
+    extractor = sub.add_parser(
+        "extract", help="recover the files a capture shows being sent to the upgrade center")
+    extractor.add_argument("capture")
+    extractor.add_argument("-o", "--output", required=True,
+                           help="new or empty directory for the files and report.json")
+    extractor.add_argument("--device", type=_number, help="USB device address to keep")
+
     flash = sub.add_parser("flash", help="write firmware (device must be prepared)")
     flash.add_argument("package", help="dji_system.bin tar image")
     flash.add_argument("--target", required=True)
@@ -273,7 +319,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 HANDLERS = {"scan": cmd_scan, "version": cmd_version, "inspect": cmd_inspect,
-            "plan": cmd_plan, "decode": cmd_decode, "flash": cmd_flash}
+            "plan": cmd_plan, "decode": cmd_decode, "extract": cmd_extract,
+            "flash": cmd_flash}
 
 
 def main(argv: list[str] | None = None) -> int:

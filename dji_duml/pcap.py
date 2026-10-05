@@ -21,6 +21,7 @@ from .frame import Frame, StreamParser
 DLT_USB_LINUX = 189
 DLT_USB_LINUX_MMAPPED = 220
 DLT_USBPCAP = 249
+_SUPPORTED = {DLT_USB_LINUX, DLT_USB_LINUX_MMAPPED, DLT_USBPCAP}
 _BULK = 3
 _STALL_SECONDS = 0.2
 
@@ -76,6 +77,8 @@ def _records(path: Path) -> Iterator[tuple[int, float, bytes]]:
         if rest is None:
             raise CaptureError("Capture file is too short.")
         linktype = struct.unpack_from(order + "I", rest, 16)[0] & 0x0FFFFFFF
+        if linktype not in _SUPPORTED:
+            raise CaptureError(_unsupported(linktype))
         while (header := _exact(handle, 16)) is not None:
             seconds, fraction, captured, _ = struct.unpack(order + "IIII", header)
             packet = _exact(handle, captured)
@@ -156,8 +159,12 @@ def _usbmon(time: float, packet: bytes, header_len: int) -> BulkChunk | None:
     return BulkChunk(time, bus, device, endpoint, payload) if payload else None
 
 
+def _unsupported(linktype: int) -> str:
+    return f"Unsupported link type {linktype}; expected USBPcap or usbmon."
+
+
 def bulk_chunks(path: str | Path) -> Iterator[BulkChunk]:
-    seen = False
+    seen, skipped = False, None
     for linktype, time, packet in _records(Path(path)):
         if linktype == DLT_USBPCAP:
             chunk = _usbpcap(time, packet)
@@ -166,12 +173,15 @@ def bulk_chunks(path: str | Path) -> Iterator[BulkChunk]:
         elif linktype == DLT_USB_LINUX:
             chunk = _usbmon(time, packet, 48)
         else:
-            raise CaptureError(f"Unsupported link type {linktype}; expected USBPcap or usbmon.")
+            # A pcapng may add, say, a network interface next to the USB one.
+            skipped = linktype
+            continue
         seen = True
         if chunk is not None:
             yield chunk
     if not seen:
-        raise CaptureError("Capture contains no packets.")
+        raise CaptureError(_unsupported(skipped) if skipped is not None
+                           else "Capture contains no packets.")
 
 
 @dataclass
@@ -182,40 +192,51 @@ class TraceStats:
     discarded: int = 0
 
 
-def decode(path: str | Path, *, device: int | None = None,
-           endpoints: set[int] | None = None) -> tuple[list[TraceEntry], TraceStats]:
-    """Decode every DUML frame in the capture, in capture order."""
+def iter_frames(path: str | Path, *, device: int | None = None,
+                endpoints: set[int] | None = None,
+                stats: TraceStats | None = None) -> Iterator[TraceEntry]:
+    """Every DUML frame in the capture, streamed as its bytes arrive (per
+    endpoint in order; across endpoints in capture order)."""
+    stats = TraceStats() if stats is None else stats
     parsers: dict[tuple[int, int, int], StreamParser] = {}
     last_seen: dict[tuple[int, int, int], BulkChunk] = {}
-    entries: list[TraceEntry] = []
-    stats = TraceStats()
 
-    def release(key) -> None:
+    def release(key) -> Iterator[TraceEntry]:
         # A frame candidate that did not complete is noise: drop it so the
         # valid frames queued behind it are not lost.
         parser, origin = parsers[key], last_seen[key]
         while parser.pending:
             for frame in parser.resync():
-                entries.append(TraceEntry(origin.time, origin.bus, origin.device,
-                                          origin.endpoint, frame))
+                stats.frames += 1
+                yield TraceEntry(origin.time, origin.bus, origin.device, origin.endpoint, frame)
 
-    for chunk in bulk_chunks(path):
-        if device is not None and chunk.device != device:
-            continue
-        if endpoints is not None and chunk.endpoint not in endpoints:
-            continue
-        stats.chunks += 1
-        stats.bytes += len(chunk.data)
-        key = (chunk.bus, chunk.device, chunk.endpoint)
-        parser = parsers.setdefault(key, StreamParser())
-        if parser.pending and chunk.time - last_seen[key].time > _STALL_SECONDS:
-            release(key)
-        last_seen[key] = chunk
-        for frame in parser.feed(chunk.data):
-            entries.append(TraceEntry(chunk.time, chunk.bus, chunk.device, chunk.endpoint, frame))
-    for key in parsers:
-        release(key)
+    try:
+        for chunk in bulk_chunks(path):
+            if device is not None and chunk.device != device:
+                continue
+            if endpoints is not None and chunk.endpoint not in endpoints:
+                continue
+            stats.chunks += 1
+            stats.bytes += len(chunk.data)
+            key = (chunk.bus, chunk.device, chunk.endpoint)
+            parser = parsers.setdefault(key, StreamParser())
+            if parser.pending and chunk.time - last_seen[key].time > _STALL_SECONDS:
+                yield from release(key)
+            last_seen[key] = chunk
+            for frame in parser.feed(chunk.data):
+                stats.frames += 1
+                yield TraceEntry(chunk.time, chunk.bus, chunk.device, chunk.endpoint, frame)
+        for key in parsers:
+            yield from release(key)
+    finally:
+        # Also when the caller stops early.
+        stats.discarded = sum(parser.discarded for parser in parsers.values())
+
+
+def decode(path: str | Path, *, device: int | None = None,
+           endpoints: set[int] | None = None) -> tuple[list[TraceEntry], TraceStats]:
+    """Decode every DUML frame in the capture, in capture order."""
+    stats = TraceStats()
+    entries = list(iter_frames(path, device=device, endpoints=endpoints, stats=stats))
     entries.sort(key=lambda entry: entry.time)
-    stats.frames = len(entries)
-    stats.discarded = sum(parser.discarded for parser in parsers.values())
     return entries, stats
