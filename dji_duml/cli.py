@@ -130,14 +130,14 @@ def cmd_topology(args, profile) -> int:
             deadline = time.monotonic() + args.seconds
             while time.monotonic() < deadline:
                 for frame in client.poll(min(0.1, max(0.0, deadline - time.monotonic()))):
-                    graph.observe(frame)
+                    graph.observe(frame, time.monotonic())
             if args.probe:
                 topology.probe_versions(client, graph, args.probe, timeout=args.probe_timeout)
 
     if args.json:
         _say(json.dumps(graph.as_dict(), ensure_ascii=False))
     else:
-        _say(topology.report(graph, commands_per_module=args.commands))
+        _say(topology.report(graph, commands_per_module=args.commands, verbose=args.verbose))
     return 0 if graph.confirmed else 2
 
 
@@ -823,6 +823,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="live: seconds per explicit Version Inquiry (default 0.2)")
     topo.add_argument("--commands", type=int, default=8,
                       help="text report: top commands per module (default 8)")
+    topo.add_argument("-v", "--verbose", action="store_true",
+                      help="show per-stream rate, payload and sequence fingerprints")
     topo.add_argument("--json", action="store_true", help="one JSON topology object")
 
     manifest = sub.add_parser(
