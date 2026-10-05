@@ -206,6 +206,41 @@ class PassiveTopologyTests(unittest.TestCase):
             "scale=+1.00000 bias=+0.00 rmse=0.00",
             text,
         )
+        self.assertIn("tail-motion:", text)
+        self.assertIn("dominant=omega_x", text)
+        self.assertIn("tail-unknown35-fit:", text)
+        self.assertIn(
+            "omega_x lag=+0 corr=+1.000 "
+            "scale=+1.00000 bias=+0.00 rmse=0.00",
+            text,
+        )
+
+    def test_unknown35_fit_is_reported_below_global_threshold(self):
+        topology = Topology(host=0x2A)
+        rolls = (0, 80, 200, 360, 550, 750)
+        raw35 = (0, 9, 5, 18, 10, 25)
+        for seq, (roll_tenths, raw_value) in enumerate(zip(rolls, raw35), 1):
+            payload = bytearray(84)
+            struct.pack_into(
+                "<ddhhhhhhhBBI",
+                payload,
+                0,
+                0.0, 0.0,
+                0, 0, 0, 0,
+                0, roll_tenths, 0,
+                0, 0, 0,
+            )
+            payload[0x35:0x37] = int(raw_value).to_bytes(
+                2, "little", signed=True
+            )
+            topology.observe(
+                Frame(0x03, 0x0A, seq, 0x03, 0x43, bytes(payload), ack=0),
+                seq * 0.5,
+            )
+
+        text = report(topology, verbose=True)
+        self.assertIn("tail-unknown35-fit:", text)
+        self.assertIn("omega_x", text)
 
     def test_flyc_tail_acceleration_correlation(self):
         topology = Topology(host=0x2A)
