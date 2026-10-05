@@ -57,6 +57,8 @@ class GimbalParamsTests(unittest.TestCase):
         for legacy, quat in zip(item.attitude_deg, item.quaternion_euler_deg):
             self.assertAlmostEqual(legacy, quat, delta=0.1)
         self.assertLess(item.quaternion_orientation_error_deg, 0.1)
+        self.assertAlmostEqual(item.yaw_reference_deg, -86.85, places=2)
+        self.assertAlmostEqual(item.pitch_joint_deg, 25.2, places=1)
 
     def test_yaw_only_capture_matches_quaternion_euler(self):
         item = parse_gimbal_params(self.YAW_ONLY)
@@ -68,7 +70,9 @@ class GimbalParamsTests(unittest.TestCase):
         for legacy, quat in zip(item.attitude_deg, item.quaternion_euler_deg):
             self.assertAlmostEqual(legacy, quat, delta=0.1)
         self.assertLess(item.quaternion_orientation_error_deg, 0.1)
-        self.assertAlmostEqual(item.relative_yaw_deg, 28.8, places=1)
+        self.assertAlmostEqual(item.relative_yaw_deg, 27.4, places=1)
+        self.assertAlmostEqual(item.yaw_reference_deg, -86.85, places=2)
+        self.assertAlmostEqual(item.predicted_yaw_deg, -59.45, places=2)
 
     def test_quaternion_wz_matches_stationary_legacy_yaw(self):
         item = parse_gimbal_params(self.STATIONARY)
