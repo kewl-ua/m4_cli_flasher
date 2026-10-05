@@ -718,6 +718,123 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
     }
 
 
+def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
+    """Describe the opaque M4T FLYC 03/43 tail without assigning semantics."""
+    if stream.cmd_set != 0x03 or stream.cmd_id != 0x43:
+        return None
+
+    from .telemetry import parse_flyc_osd_general
+
+    rows = []
+    for _, payload in stream._samples:
+        try:
+            item = parse_flyc_osd_general(payload)
+        except UnexpectedReply:
+            continue
+        if len(payload) < 84:
+            continue
+        vx, vy, vz = item.velocity_mps
+        pitch, roll, yaw = item.attitude_deg
+        rows.append((
+            payload,
+            {
+                "height": item.relative_height_m,
+                "vx": vx,
+                "vy": vy,
+                "vz": vz,
+                "pitch": pitch,
+                "roll": roll,
+                "yaw": yaw,
+            },
+        ))
+
+    if len(rows) < 3:
+        return None
+
+    start = 36
+    end = min(len(row[0]) for row in rows)
+    changed = []
+    byte_ranges = {}
+    bit_masks = {}
+    first = rows[0][0]
+
+    for offset in range(start, end):
+        values = [payload[offset] for payload, _ in rows]
+        low, high = min(values), max(values)
+        if low != high:
+            changed.append(offset)
+            byte_ranges[offset] = (low, high, len(set(values)))
+            mask = 0
+            base = first[offset]
+            for value in values:
+                mask |= base ^ value
+            bit_masks[offset] = mask
+
+    words = []
+    for offset in range(start, end - 1, 2):
+        raw = [
+            int.from_bytes(payload[offset:offset + 2], "little", signed=False)
+            for payload, _ in rows
+        ]
+        if len(set(raw)) <= 1:
+            continue
+        signed = [
+            value if value < 0x8000 else value - 0x10000
+            for value in raw
+        ]
+        words.append({
+            "offset": offset,
+            "u16_range": (min(raw), max(raw)),
+            "i16_range": (min(signed), max(signed)),
+            "unique": len(set(raw)),
+        })
+
+    signals = {
+        name: [known[name] for _, known in rows]
+        for name in ("height", "vx", "vy", "vz", "pitch", "roll", "yaw")
+    }
+    correlations = []
+    for offset in range(start, end - 1):
+        unsigned = [
+            int.from_bytes(payload[offset:offset + 2], "little", signed=False)
+            for payload, _ in rows
+        ]
+        if len(set(unsigned)) <= 2:
+            continue
+        signed = [
+            value if value < 0x8000 else value - 0x10000
+            for value in unsigned
+        ]
+        for signedness, values in (("u16", unsigned), ("i16", signed)):
+            numeric = [float(value) for value in values]
+            for signal, target in signals.items():
+                corr = _pearson(numeric, target)
+                if corr is None or abs(corr) < 0.80:
+                    continue
+                correlations.append({
+                    "offset": offset,
+                    "type": signedness,
+                    "signal": signal,
+                    "corr": corr,
+                    "unique": len(set(values)),
+                })
+
+    correlations.sort(
+        key=lambda item: (-abs(item["corr"]), item["offset"], item["type"], item["signal"])
+    )
+
+    return {
+        "changed": set(changed),
+        "byte_ranges": byte_ranges,
+        "bit_masks": bit_masks,
+        "words": words,
+        "correlations": correlations[:12],
+        "samples": len(rows),
+        "tail_start": start,
+        "tail_end": end,
+    }
+
+
 def _gimbal_angle_correlations(stream: TrafficStream) -> dict[str, dict[str, float | None]]:
     """Correlate opaque int16 fields with the actual Euler angles."""
     if stream.cmd_set != 0x04 or stream.cmd_id != 0x05:
@@ -960,6 +1077,51 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                             f"ctrl=0x{osd.ctrl_info:02X} state=0x{osd.controller_state:08X} "
                             f"tail={len(osd.tail)}B"
                         )
+                        tail = _flyc_tail_diagnostics(stream)
+                        if tail is not None:
+                            lines.append(
+                                f"       tail-changed: {_offset_ranges(tail['changed'])} "
+                                f"samples={tail['samples']}"
+                            )
+                            if tail["byte_ranges"]:
+                                byte_parts = []
+                                for offset in sorted(tail["byte_ranges"])[:16]:
+                                    low, high, unique = tail["byte_ranges"][offset]
+                                    mask = tail["bit_masks"][offset]
+                                    byte_parts.append(
+                                        f"@{offset:02X}={low:02X}..{high:02X}"
+                                        f"/u{unique}/mask{mask:02X}"
+                                    )
+                                if len(tail["byte_ranges"]) > 16:
+                                    byte_parts.append("...")
+                                lines.append(
+                                    "       tail-bytes: " + "  ".join(byte_parts)
+                                )
+                            if tail["words"]:
+                                word_parts = []
+                                for item in tail["words"][:12]:
+                                    ulo, uhi = item["u16_range"]
+                                    slo, shi = item["i16_range"]
+                                    word_parts.append(
+                                        f"@{item['offset']:02X} "
+                                        f"u16={ulo}..{uhi} "
+                                        f"i16={slo}..{shi} "
+                                        f"uniq={item['unique']}"
+                                    )
+                                if len(tail["words"]) > 12:
+                                    word_parts.append("...")
+                                lines.append(
+                                    "       tail-u16: " + "  ".join(word_parts)
+                                )
+                            if tail["correlations"]:
+                                corr_parts = [
+                                    f"{item['type']}@{item['offset']:02X}"
+                                    f"->{item['signal']}={item['corr']:+.3f}"
+                                    for item in tail["correlations"]
+                                ]
+                                lines.append(
+                                    "       tail-corr: " + "  ".join(corr_parts)
+                                )
                 elif stream.cmd_set == 0x04 and stream.cmd_id == 0x05:
                     from .telemetry import parse_gimbal_params
                     try:
