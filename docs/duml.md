@@ -637,3 +637,11 @@ receive-time delta. Raw sliding u16/i16 tail windows are correlated against
 omega_x, omega_y, omega_z and omega magnitude. These are still RE hints because
 03/43 has no verified device timestamp and arrives at only about 2 Hz, but they
 avoid the axis-coupling error of naive Euler differentiation.
+
+
+Categorical tail-state hints are emitted only for candidate standalone bytes.
+Continuation bytes of known historical multi-byte slots are excluded
+structurally. For example, payload offset 0x36 is treated as the high byte of
+the historical Unknown35 word at 0x35..0x36 rather than as an independent
+binary/categorical state, regardless of whether that high byte takes values
+00/FF or FE/FF/00/01 during wider signed excursions.
