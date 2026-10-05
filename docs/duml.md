@@ -456,11 +456,16 @@ measurements in all dynamic conditions.
 ### FC / Gimbal yaw cross-check
 
 Verbose topology pairs FLYC 03/43 and GIMBAL 04/05 by nearest host receive
-time. The final cross-attitude block tests body-relative models directly:
-joint@14 against gimbal_pitch - FC_pitch, ext@16 against gimbal_roll - FC_roll,
-and relative@08 against gimbal_yaw - FC_yaw. Field 0x10 is reported separately
-as an internal yaw-reference candidate and is not assumed to be body yaw.
+time. Body-relative orientation is solved in 3D, not by subtracting Euler
+components: FC Euler is converted to a quaternion, then
+q_relative = inverse(q_FC) * q_gimbal. The resulting relative pitch/roll/yaw
+is compared with joint@14, ext@16 and legacy relative-yaw@08.
 
-This pairing is intentionally empirical: low timing skew is reported alongside
-correlations and median/max angular error, so a field is promoted only when the
-model survives controlled airframe and gimbal motion.
+This matters at large pitch/roll angles, where component-wise Euler subtraction
+produces false errors because the axes are coupled. Field 0x10 is reported
+separately as an internal yaw-reference candidate and is not assumed to be
+body yaw.
+
+The report includes host-time pairing skew, solved relative quaternion Euler
+ranges, correlations and median/max angular error, so a field is promoted only
+when the model survives controlled airframe and gimbal motion.
