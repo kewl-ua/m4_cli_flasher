@@ -450,3 +450,18 @@ The fields at 0x12..0x13, 0x16..0x17 and 0x28..end remain unnamed. At high
 pitch rates/extreme pitch angles the quaternion and legacy mechanical Euler
 angles can diverge transiently, so they must not be treated as identical
 measurements in all dynamic conditions.
+
+
+### FC / Gimbal yaw cross-check
+
+Verbose topology correlates FLYC 03/43 yaw with the nearest GIMBAL 04/05
+sample in host receive time. The final cross-yaw block reports the pair timing
+skew, unwrapped correlations and the angular error between FC yaw and the M4T
+gimbal yaw-reference field at 0x10.
+
+A useful controlled experiment is to keep the gimbal fixed relative to the
+airframe and rotate the whole aircraft around yaw. If 0x10 is the body/FC yaw
+reference, FC yaw and ref@10 should move together while relative@08 remains
+nearly constant. If the gimbal stabilizes in world coordinates instead, the
+same report will show that behavior via gimbal/relative yaw instead of forcing
+a semantic conclusion.
