@@ -101,12 +101,12 @@ class GimbalParams:
     yaw on stationary captures, strongly identifying them as a quaternion.
 
     Bytes 12..15 are verified on M4T as a millisecond monotonic timestamp.
-    Controlled pitch/yaw captures also establish an empirical yaw reference at
-    0x10 (signed int16, 0.01 degree) and a secondary pitch/joint angle at 0x14
-    (signed int16, 0.1 degree). The legacy 0x08 yaw angle behaves as relative
-    yaw: yaw_reference + relative_yaw predicts packet yaw with sub-degree median
-    error in controlled captures. Bytes 0x12..0x13, 0x16..0x17 and 40..end
-    remain unnamed until independently verified.
+    Controlled captures establish a secondary pitch/joint field at 0x14
+    (signed int16, 0.1 degree) and show the legacy 0x08 yaw-angle field behaving
+    as a body-relative yaw candidate. Field 0x10 is a signed 0.01-degree
+    internal yaw reference, but body-rotation tests show it is not simply
+    FC/body yaw. Bytes 0x12..0x13, 0x16..0x17 and 40..end remain unnamed until
+    independently verified.
     """
 
     pitch_tenths: int
@@ -143,7 +143,11 @@ class GimbalParams:
 
     @property
     def yaw_reference_deg(self) -> float | None:
-        """Empirical M4T yaw reference at payload 0x10, in 0.01 degrees."""
+        """Internal M4T yaw-reference candidate at 0x10, in 0.01 degrees.
+
+        Controlled body-rotation captures show this is not simply FC/body yaw.
+        The name is intentionally descriptive rather than a physical claim.
+        """
         if self.yaw_reference_hundredths is None:
             return None
         return self.yaw_reference_hundredths / 100.0
@@ -154,14 +158,6 @@ class GimbalParams:
         if self.pitch_joint_tenths is None:
             return None
         return self.pitch_joint_tenths / 10.0
-
-    @property
-    def predicted_yaw_deg(self) -> float | None:
-        """Yaw predicted by the empirically verified reference+relative model."""
-        if self.yaw_reference_deg is None:
-            return None
-        value = self.yaw_reference_deg + self.relative_yaw_deg
-        return (value + 180.0) % 360.0 - 180.0
 
     @property
     def quaternion_norm(self) -> float | None:
