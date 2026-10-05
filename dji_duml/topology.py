@@ -58,9 +58,11 @@ class TrafficStream:
     seq_steps: Counter[str] = field(default_factory=Counter)
     seq_deltas: Counter[int] = field(default_factory=Counter)
     seq_deltas_capped: bool = False
+    ack_counts: Counter[int] = field(default_factory=Counter)
 
     def observe(self, frame: Frame, timestamp: float | None) -> None:
         self.count += 1
+        self.ack_counts[int(frame.ack)] += 1
         if timestamp is not None:
             if self.first_seen is None:
                 self.first_seen = timestamp
@@ -145,6 +147,7 @@ class TrafficStream:
             "seq_steps": dict(self.seq_steps),
             "seq_deltas": {str(delta): count for delta, count in self.seq_deltas.items()},
             "seq_deltas_exact": not self.seq_deltas_capped,
+            "ack_counts": {str(ack): count for ack, count in self.ack_counts.items()},
         }
 
 
@@ -369,10 +372,23 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                 ) or "-"
                 if stream.seq_deltas_capped:
                     deltas += ",..."
-                kind = "response" if stream.response else "request/push"
+                if stream.response:
+                    kind = "response"
+                elif set(stream.ack_counts) == {0}:
+                    kind = "push"
+                elif 0 not in stream.ack_counts:
+                    kind = "request"
+                else:
+                    kind = "request/push"
+                ack_names = {0: "none", 1: "before", 2: "after", 3: "reserved"}
+                acks = ",".join(
+                    f"{ack_names.get(ack, str(ack))}:{count}"
+                    for ack, count in sorted(stream.ack_counts.items())
+                )
                 lines.append(
                     f"    -> 0x{stream.receiver:02X}  {stream.cmd_set:02X}/{stream.cmd_id:02X}  "
-                    f"{kind}  n={stream.count}  {rate}  {payload}  {unique}  seq[{seq}]"
+                    f"{kind}  n={stream.count}  {rate}  {payload}  {unique}  "
+                    f"ack[{acks}]  seq[{seq}]"
                 )
                 sample = stream.sample_payload[:64].hex(" ")
                 if len(stream.sample_payload) > 64:
