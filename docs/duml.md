@@ -491,7 +491,9 @@ joint orders it evaluates both:
 - q_relative = q_mount * q_joints
 - q_relative = q_joints * q_mount
 
-The constant q_mount is estimated only from alternating training samples and
-scored on the held-out samples. The report prints mount-fit cv-median/max error
-and the best mounting quaternion as Euler angles. This avoids treating a fitted
-constant frame offset as evidence unless it generalizes to unseen samples.
+The constant q_mount is scored with bidirectional blocked cross-validation:
+fit on the first contiguous half and validate on the second, then reverse the
+halves. Only after those held-out errors are established is the descriptive
+mount quaternion fitted on the full window. This avoids the strong temporal
+leakage of alternating 10 Hz samples. The report prints mount-fit blocked-CV
+median/max error and the best mounting quaternion as Euler angles.
