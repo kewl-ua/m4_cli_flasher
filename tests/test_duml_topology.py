@@ -146,6 +146,64 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("unknown35?@35=", text)
         self.assertIn("i16@28->pitch=+1.000", text)
         self.assertIn("i16@35->pitch=+1.000", text)
+        self.assertIn("tail-state@33:", text)
+
+    def test_flyc_tail_counter_candidate_estimates_frequency(self):
+        topology = Topology(host=0x2A)
+        value = 10
+        for seq in range(1, 9):
+            payload = bytearray(84)
+            struct.pack_into(
+                "<ddhhhhhhhBBI",
+                payload,
+                0,
+                0.0, 0.0,
+                0, 0, 0, 0,
+                0, 0, 0,
+                0, 0, 0,
+            )
+            payload[0x28] = value & 0xFF
+            topology.observe(
+                Frame(0x03, 0x0A, seq, 0x03, 0x43, bytes(payload), ack=0),
+                seq * 0.5,
+            )
+            value += 25
+
+        text = report(topology, verbose=True)
+        self.assertIn("tail-counter-like:", text)
+        self.assertIn("@28=50.00/s", text)
+
+    def test_flyc_tail_acceleration_correlation(self):
+        topology = Topology(host=0x2A)
+        rows = (
+            (0, 0),
+            (10, 0),
+            (40, 8),
+            (100, 12),
+            (200, 16),
+        )
+        for seq, (pitch_tenths, accel_raw) in enumerate(rows, 1):
+            payload = bytearray(84)
+            struct.pack_into(
+                "<ddhhhhhhhBBI",
+                payload,
+                0,
+                0.0, 0.0,
+                0, 0, 0, 0,
+                pitch_tenths, 0, 0,
+                0, 0, 0,
+            )
+            payload[0x35:0x37] = int(accel_raw).to_bytes(
+                2, "little", signed=True
+            )
+            topology.observe(
+                Frame(0x03, 0x0A, seq, 0x03, 0x43, bytes(payload), ack=0),
+                seq * 0.5,
+            )
+
+        text = report(topology, verbose=True)
+        self.assertIn("tail-accel-corr:", text)
+        self.assertIn("i16@35->pitch_accel=+1.000", text)
 
     def test_flyc_tail_rate_correlation_finds_odd_offset_word(self):
         topology = Topology(host=0x2A)
