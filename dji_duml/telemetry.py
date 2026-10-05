@@ -18,6 +18,10 @@ GIMBAL = 0x04
 OSD_GENERAL = 0x43
 GIMBAL_PARAMS = 0x05
 
+FLYC_OSD_VERIFIED_PREFIX_SIZE = 36
+FLYC_OSD_LEGACY_BASE_SIZE = 50
+FLYC_OSD_LEGACY_WM620_SIZE = 55
+
 
 @dataclass(frozen=True)
 class FlycOsdGeneral:
@@ -27,8 +31,10 @@ class FlycOsdGeneral:
     M4T captures. Longitude/latitude are returned exactly as the protocol's
     little-endian doubles; no degree/radian conversion is assumed here.
 
-    M4T currently carries an 84-byte payload, so the tail deliberately remains
-    opaque until its fields are established empirically.
+    M4T currently carries an 84-byte payload. Public legacy dissectors extend
+    the historical layout to 50 bytes (P3) or 55 bytes (WM620), but M4T may
+    repurpose those slots. The parser therefore keeps everything after the
+    verified 36-byte prefix raw while exposing structural region views only.
     """
 
     longitude: float
@@ -44,6 +50,24 @@ class FlycOsdGeneral:
     latest_cmd: int
     controller_state: int
     tail: bytes
+
+    @property
+    def legacy_base_region(self) -> bytes:
+        """Raw payload bytes 0x24..0x31 from the historical 50-byte layout."""
+        return self.tail[:FLYC_OSD_LEGACY_BASE_SIZE - FLYC_OSD_VERIFIED_PREFIX_SIZE]
+
+    @property
+    def legacy_wm620_region(self) -> bytes:
+        """Raw payload bytes 0x32..0x36 from the historical 55-byte layout."""
+        start = FLYC_OSD_LEGACY_BASE_SIZE - FLYC_OSD_VERIFIED_PREFIX_SIZE
+        end = FLYC_OSD_LEGACY_WM620_SIZE - FLYC_OSD_VERIFIED_PREFIX_SIZE
+        return self.tail[start:end]
+
+    @property
+    def newer_extension(self) -> bytes:
+        """Raw bytes after historical offset 0x36 (payload offset 0x37+)."""
+        start = FLYC_OSD_LEGACY_WM620_SIZE - FLYC_OSD_VERIFIED_PREFIX_SIZE
+        return self.tail[start:]
 
     @property
     def relative_height_m(self) -> float:
