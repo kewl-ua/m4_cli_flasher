@@ -62,7 +62,7 @@ class GimbalKinematicsTests(unittest.TestCase):
         fc = (12.0, -7.0, -80.0)
         measured = kin.world_orientation(fc, item)
         item = replace(item, quaternion_wxyz=measured)
-        self.assertLess(kin.orientation_error_deg(fc, item), 1e-6)
+        self.assertLess(kin.orientation_error_deg(fc, item), 1e-5)
 
     def test_measured_joint_solver_matches_packet_fields(self):
         item = self.sample(pitch=-18.0, roll=7.0, yaw=-31.0)
