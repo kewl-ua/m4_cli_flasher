@@ -136,6 +136,33 @@ def quaternion_angular_distance_deg(
     return math.degrees(2.0 * math.acos(dot))
 
 
+def quaternion_average(
+    quaternions: list[tuple[float, float, float, float]],
+) -> tuple[float, float, float, float]:
+    """Average nearby orientations with hemisphere alignment.
+
+    Intended for estimating a constant mounting transform, not for averaging
+    arbitrary multimodal orientation distributions.
+    """
+    if not quaternions:
+        raise ValueError("at least one quaternion is required")
+    reference = quaternions[0]
+    aligned = []
+    for quaternion in quaternions:
+        norm = sum(value * value for value in quaternion) ** 0.5
+        if norm <= 0:
+            raise ValueError("zero-norm quaternion")
+        q = tuple(value / norm for value in quaternion)
+        if sum(a * b for a, b in zip(reference, q)) < 0.0:
+            q = tuple(-value for value in q)
+        aligned.append(q)
+    summed = tuple(sum(q[index] for q in aligned) for index in range(4))
+    norm = sum(value * value for value in summed) ** 0.5
+    if norm <= 0:
+        raise ValueError("degenerate quaternion average")
+    return tuple(value / norm for value in summed)
+
+
 def quaternion_slerp(
     left: tuple[float, float, float, float],
     right: tuple[float, float, float, float],
