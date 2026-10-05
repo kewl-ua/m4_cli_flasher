@@ -43,6 +43,8 @@ dji-duml version                      # один read-only запрос, пок�
 dji-duml inspect dji_system.bin       # модель, версия, MD5/SHA-256; без USB
 dji-duml plan M4T_UAV_17.02.05.01_pro.zip   # точные кадры будущей прошивки; ничего не отправляет
 dji-duml decode capture.pcap --device 47 --endpoint 0x04 --endpoint 0x85 --upgrade-only
+dji-duml topology --capture capture.pcap             # реальные DUML type:index из трафика
+dji-duml topology --seconds 3 --probe 0x1f           # live: пассивно + явный read-only probe
 dji-duml extract capture.pcap -o files   # файлы, отправленные центру обновления, с проверкой
 dji-duml pack files -o 17.01.0516_dji_system.bin   # пакет для flash из извлечённых файлов
 dji-duml manifest --compare M4T_UAV_17.02.05.01_pro.zip   # что ровно стоит на дроне; только чтение
@@ -99,6 +101,36 @@ MI03-MI07 — vendor-интерфейсы (class FF / 43 / 01); libusb-win32 в�
 По MI04 постоянно идёт телеметрия (около 1400 кадров/с на 2026-10-04:
 подвес `04/05`, полётный контроллер `03/43`, модули `0x92`, `0x48`), в том
 числе на адреса `0A` и `8A`. В журнал они попадают только счётчиками.
+
+
+### DUML topology / discovery
+
+`dji-duml topology` строит карту адресов DUML без предположения, что любой
+адрес-получатель означает реально присутствующий модуль.
+
+- `+` (**confirmed**) — с адреса реально пришёл CRC-valid DUML frame либо адрес
+  ответил на явно запрошенный read-only `GENERAL/01 Version Inquiry`.
+- `?` (**candidate**) — адрес встречался только как receiver. Это полезная
+  зацепка, но не доказательство существования endpoint.
+- индекс берётся прямо из старших 3 бит DUML-адреса, поэтому `Camera 1:0` и
+  `Camera 1:2` учитываются как разные модули.
+- passive capture ничего не отправляет устройству.
+- live active probe выполняется **только** для адресов, переданных через
+  `--probe`; скрытого перебора всех 256 адресов нет, retries нет.
+
+Пример:
+
+```text
+DUML topology: 184235 frames, 5 confirmed, 2 candidates
++ 0x03  Flight Controller idx=0  passive  tx=63120 rx=18
+    commands: 03/43 x42081, 03/57 x10520, ...
++ 0x44  Gimbal idx=2  passive  tx=18750 rx=0
+    commands: 04/05 x18750
+? 0x0A  PC idx=0  receiver-only  rx=900
+```
+
+Для машинной обработки есть `--json`; там сохраняются счётчики tx/rx и
+наблюдавшиеся `cmd_set/cmd_id` по каждому адресу.
 
 ## Кадр DUML v1
 
