@@ -101,6 +101,33 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("|q|=1.000000", text)
         self.assertIn("opaque=21B", text)
 
+    def test_gimbal_window_stats_cover_controlled_motion(self):
+        stationary = bytes.fromhex(
+            "00 00 00 00 9b fc 82 00 00 00 00 01"
+            " f4 c6 97 00 11 de 00 00 fb ff 0f 00"
+            " 6c e4 39 3f 0c ae 81 35 6c b0 d9 b5 f4 02 30 bf"
+            " 00 00 00 00 00 00 00 00 00"
+        )
+        yaw = bytes.fromhex(
+            "05 00 1c 00 bd fd 82 00 12 01 00 01"
+            " 69 79 9e 00 13 de 00 00 04 00 fb ff"
+            " 37 ed 5f 3f a7 d1 bf 3c 3c 25 02 bc 15 d0 f7 be"
+            " 00 00 00 00 00 00 00 00 00"
+        )
+        topology = Topology(host=0x2A)
+        topology.observe(Frame(0x04, 0x2A, 1, 4, 5, stationary, ack=0), 1.0)
+        topology.observe(Frame(0x04, 0x2A, 44, 4, 5, yaw, ack=0), 1.1)
+        text = report(topology, verbose=True)
+        self.assertIn(
+            "window-att: pitch=0.0..0.5  roll=0.0..2.8  yaw=-86.9..-57.9 deg",
+            text,
+        )
+        self.assertIn("q-check: |q|=", text)
+        self.assertIn("u32@0C=9946868..10385769", text)
+        self.assertIn("u32@10=56849..56851", text)
+        self.assertIn("i16@14=-5..4", text)
+        self.assertIn("i16@16=-5..15", text)
+
     def test_report_distinguishes_confirmed_and_candidates(self):
         host = address(10, 1)
         fc = address(3, 0)
