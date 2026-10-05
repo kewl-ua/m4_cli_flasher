@@ -379,6 +379,82 @@ def _angle_delta_degrees(current: float, previous: float) -> float:
     return (current - previous + 180.0) % 360.0 - 180.0
 
 
+def _gimbal_angle_correlations(stream: TrafficStream) -> dict[str, dict[str, float | None]]:
+    """Correlate opaque int16 fields with the actual Euler angles."""
+    if stream.cmd_set != 0x04 or stream.cmd_id != 0x05:
+        return {}
+
+    from .telemetry import parse_gimbal_params
+
+    pitch = []
+    roll = []
+    yaw = []
+    raw14 = []
+    raw16 = []
+    for _, payload in stream._samples:
+        if len(payload) < 24:
+            continue
+        try:
+            item = parse_gimbal_params(payload)
+        except UnexpectedReply:
+            continue
+        p, r, y = item.attitude_deg
+        pitch.append(p)
+        roll.append(r)
+        yaw.append(y)
+        raw14.append(int.from_bytes(payload[0x14:0x16], "little", signed=True) / 10.0)
+        raw16.append(int.from_bytes(payload[0x16:0x18], "little", signed=True) / 10.0)
+
+    return {
+        "i16@14/10": {
+            "pitch": _pearson(raw14, pitch),
+            "roll": _pearson(raw14, roll),
+            "yaw": _pearson(raw14, yaw),
+        },
+        "i16@16/10": {
+            "pitch": _pearson(raw16, pitch),
+            "roll": _pearson(raw16, roll),
+            "yaw": _pearson(raw16, yaw),
+        },
+    }
+
+
+def _gimbal_yaw_model(stream: TrafficStream) -> dict | None:
+    """Test whether 0x10 is a yaw reference and legacy 0x08 is relative yaw."""
+    if stream.cmd_set != 0x04 or stream.cmd_id != 0x05:
+        return None
+
+    from .telemetry import parse_gimbal_params
+
+    references = []
+    relatives = []
+    errors = []
+    for _, payload in stream._samples:
+        if len(payload) < 20:
+            continue
+        try:
+            item = parse_gimbal_params(payload)
+        except UnexpectedReply:
+            continue
+        reference = int.from_bytes(payload[0x10:0x12], "little", signed=True) / 100.0
+        predicted = reference + item.relative_yaw_deg
+        error = _angle_error_degrees(predicted, item.attitude_deg[2])
+        references.append(reference)
+        relatives.append(item.relative_yaw_deg)
+        errors.append(error)
+
+    if not errors:
+        return None
+    ordered = sorted(errors)
+    median = ordered[len(ordered) // 2]
+    return {
+        "reference_range": _range(references),
+        "relative_range": _range(relatives),
+        "median_error": median,
+        "max_error": max(errors),
+    }
+
+
 def _gimbal_rate_correlations(stream: TrafficStream) -> dict[str, dict[str, float | None]]:
     """Correlate opaque int16 fields with Euler angular rates.
 
@@ -454,7 +530,8 @@ def _gimbal_window_stats(stream: TrafficStream) -> dict | None:
         if len(payload) >= 24:
             raw.append((
                 int.from_bytes(payload[0x0C:0x10], "little"),
-                int.from_bytes(payload[0x10:0x14], "little"),
+                int.from_bytes(payload[0x10:0x12], "little", signed=True),
+                int.from_bytes(payload[0x12:0x14], "little", signed=True),
                 int.from_bytes(payload[0x14:0x16], "little", signed=True),
                 int.from_bytes(payload[0x16:0x18], "little", signed=True),
             ))
@@ -468,12 +545,10 @@ def _gimbal_window_stats(stream: TrafficStream) -> dict | None:
         item.quaternion_norm for item in decoded
         if item.quaternion_norm is not None
     ]
-    errors = [[], [], []]
-    for item in decoded:
-        if item.quaternion_euler_deg is None:
-            continue
-        for axis, (legacy, quat) in enumerate(zip(item.attitude_deg, item.quaternion_euler_deg)):
-            errors[axis].append(_angle_error_degrees(legacy, quat))
+    orientation_errors = [
+        item.quaternion_orientation_error_deg for item in decoded
+        if item.quaternion_orientation_error_deg is not None
+    ]
 
     timestamps = [
         item.timestamp_ms for item in decoded
@@ -482,7 +557,7 @@ def _gimbal_window_stats(stream: TrafficStream) -> dict | None:
     result = {
         "attitude_ranges": (_range(pitch), _range(roll), _range(yaw)),
         "quaternion_norm_range": _range(norms),
-        "quaternion_max_error": tuple(max(axis) if axis else None for axis in errors),
+        "quaternion_orientation_error_max": max(orientation_errors) if orientation_errors else None,
         "timestamp_range": _range(timestamps),
     }
     if raw:
@@ -491,6 +566,7 @@ def _gimbal_window_stats(stream: TrafficStream) -> dict | None:
             _range(row[1] for row in raw),
             _range(row[2] for row in raw),
             _range(row[3] for row in raw),
+            _range(row[4] for row in raw),
         )
     return result
 
@@ -616,12 +692,14 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                             if parts:
                                 lines.append("       window-att: " + "  ".join(parts) + " deg")
                             qnorm = stats["quaternion_norm_range"]
-                            qerr = stats["quaternion_max_error"]
+                            qerr = stats["quaternion_orientation_error_max"]
                             if qnorm is not None:
-                                lines.append(
-                                    f"       q-check: |q|={qnorm[0]:.6f}..{qnorm[1]:.6f} "
-                                    f"max-error=({qerr[0]:.3f},{qerr[1]:.3f},{qerr[2]:.3f})deg"
+                                line = (
+                                    f"       q-check: |q|={qnorm[0]:.6f}..{qnorm[1]:.6f}"
                                 )
+                                if qerr is not None:
+                                    line += f" orientation-max-error={qerr:.3f}deg"
+                                lines.append(line)
                             timestamp_range = stats.get("timestamp_range")
                             if timestamp_range is not None:
                                 device_span = timestamp_range[1] - timestamp_range[0]
@@ -639,16 +717,39 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                 lines.append(clock)
                             raw_ranges = stats.get("raw_ranges")
                             if raw_ranges is not None:
-                                raw_names = ("u32@0C", "u32@10", "i16@14", "i16@16")
+                                raw_names = ("u32@0C", "i16@10", "i16@12", "i16@14", "i16@16")
                                 raw_parts = []
                                 for name, value in zip(raw_names, raw_ranges):
                                     if value is not None:
                                         raw_parts.append(f"{name}={int(value[0])}..{int(value[1])}")
                                 lines.append("       opaque-window: " + "  ".join(raw_parts))
-                            correlations = _gimbal_rate_correlations(stream)
-                            if correlations:
+                            angle_correlations = _gimbal_angle_correlations(stream)
+                            if angle_correlations:
                                 corr_parts = []
-                                for field_name, axes in correlations.items():
+                                for field_name, axes in angle_correlations.items():
+                                    rendered = ",".join(
+                                        f"{axis}={value:+.3f}"
+                                        for axis, value in axes.items()
+                                        if value is not None
+                                    )
+                                    if rendered:
+                                        corr_parts.append(f"{field_name}[{rendered}]")
+                                if corr_parts:
+                                    lines.append("       angle-corr: " + "  ".join(corr_parts))
+                            yaw_model = _gimbal_yaw_model(stream)
+                            if yaw_model is not None:
+                                ref = yaw_model["reference_range"]
+                                rel = yaw_model["relative_range"]
+                                lines.append(
+                                    f"       yaw-model: ref@10={ref[0]:.2f}..{ref[1]:.2f}deg "
+                                    f"relative@08={rel[0]:.1f}..{rel[1]:.1f}deg "
+                                    f"median-error={yaw_model['median_error']:.3f}deg "
+                                    f"max-error={yaw_model['max_error']:.3f}deg"
+                                )
+                            rate_correlations = _gimbal_rate_correlations(stream)
+                            if rate_correlations:
+                                corr_parts = []
+                                for field_name, axes in rate_correlations.items():
                                     rendered = ",".join(
                                         f"{axis}={value:+.3f}"
                                         for axis, value in axes.items()
