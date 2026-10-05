@@ -123,6 +123,7 @@ class PassiveTopologyTests(unittest.TestCase):
             text,
         )
         self.assertIn("q-check: |q|=", text)
+        self.assertIn("clock@0C:", text)
         self.assertIn("u32@0C=9946868..10385769", text)
         self.assertIn("u32@10=56849..56851", text)
         self.assertIn("i16@14=-5..4", text)
