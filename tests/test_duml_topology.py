@@ -149,6 +149,30 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("tail-state@33:", text)
         self.assertNotIn("tail-state@36:", text)
 
+    def test_flyc_tail_position_correlation_requires_signal_span(self):
+        topology = Topology(host=0x2A)
+        for seq, roll_tenths in enumerate((0, 1, 2, 1, 0), 1):
+            payload = bytearray(84)
+            struct.pack_into(
+                "<ddhhhhhhhBBI",
+                payload,
+                0,
+                0.0, 0.0,
+                0, 0, 0, 0,
+                0, roll_tenths, 0,
+                0, 0, 0,
+            )
+            payload[0x35:0x37] = int(roll_tenths).to_bytes(
+                2, "little", signed=True
+            )
+            topology.observe(
+                Frame(0x03, 0x0A, seq, 0x03, 0x43, bytes(payload), ack=0),
+                seq * 0.5,
+            )
+
+        text = report(topology, verbose=True)
+        self.assertNotIn("i16@35->roll=", text)
+
     def test_flyc_tail_counter_candidate_estimates_frequency(self):
         topology = Topology(host=0x2A)
         value = 10
