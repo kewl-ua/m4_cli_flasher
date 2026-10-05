@@ -859,8 +859,35 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
                 delta = _angle_delta_degrees(current[source_name], previous[source_name])
             rate_signals[target_name][index] = delta / dt
 
+    second_rate_signals = {
+        name: [None] * len(rows)
+        for name in ("pitch_accel", "roll_accel", "yaw_accel")
+    }
+    first_rate_name = {
+        "pitch_accel": "pitch_rate",
+        "roll_accel": "roll_rate",
+        "yaw_accel": "yaw_rate",
+    }
+    for index in range(2, len(rows)):
+        previous_time = rows[index - 1][0]
+        current_time = rows[index][0]
+        if previous_time is None or current_time is None:
+            continue
+        dt = current_time - previous_time
+        if not 0.1 <= dt <= 1.0:
+            continue
+        for target_name, source_name in first_rate_name.items():
+            previous_rate = rate_signals[source_name][index - 1]
+            current_rate = rate_signals[source_name][index]
+            if previous_rate is None or current_rate is None:
+                continue
+            second_rate_signals[target_name][index] = (
+                current_rate - previous_rate
+            ) / dt
+
     correlations = []
     rate_correlations = []
+    second_rate_correlations = []
     for offset in range(start, end - 1):
         unsigned = [
             int.from_bytes(payload[offset:offset + 2], "little", signed=False)
@@ -905,11 +932,34 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
                     "corr": corr,
                     "unique": len(set(raw_values)),
                 })
+            for signal, target in second_rate_signals.items():
+                paired = [
+                    (numeric[index], value)
+                    for index, value in enumerate(target)
+                    if value is not None
+                ]
+                if len(paired) < 3:
+                    continue
+                raw_values = [item[0] for item in paired]
+                accel_values = [item[1] for item in paired]
+                corr = _pearson(raw_values, accel_values)
+                if corr is None or abs(corr) < 0.70:
+                    continue
+                second_rate_correlations.append({
+                    "offset": offset,
+                    "type": signedness,
+                    "signal": signal,
+                    "corr": corr,
+                    "unique": len(set(raw_values)),
+                })
 
     correlations.sort(
         key=lambda item: (-abs(item["corr"]), item["offset"], item["type"], item["signal"])
     )
     rate_correlations.sort(
+        key=lambda item: (-abs(item["corr"]), item["offset"], item["type"], item["signal"])
+    )
+    second_rate_correlations.sort(
         key=lambda item: (-abs(item["corr"]), item["offset"], item["type"], item["signal"])
     )
 
@@ -954,6 +1004,63 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
             "changed": len(set(raw_values)) > 1,
         })
 
+    counter_candidates = []
+    for offset in sorted(changed_set):
+        values = [payload[offset] for _, payload, _ in rows]
+        unique_ratio = len(set(values)) / len(values)
+        rates = []
+        steps = []
+        for index in range(1, len(rows)):
+            previous_time = rows[index - 1][0]
+            current_time = rows[index][0]
+            if previous_time is None or current_time is None:
+                continue
+            dt = current_time - previous_time
+            if not 0.1 <= dt <= 1.0:
+                continue
+            step = (values[index] - values[index - 1]) & 0xFF
+            steps.append(step)
+            rates.append(step / dt)
+        if len(rates) >= 5 and unique_ratio >= 0.70:
+            median_rate = _median(rates)
+            deviations = [abs(value - median_rate) for value in rates]
+            median_deviation = _median(deviations)
+            if median_rate is not None and median_rate > 0 and median_deviation <= max(2.0, median_rate * 0.08):
+                counter_candidates.append({
+                    "offset": offset,
+                    "median_rate_hz": median_rate,
+                    "median_step": _median([float(step) for step in steps]),
+                    "mad_rate": median_deviation,
+                    "unique_ratio": unique_ratio,
+                })
+
+    categorical_states = []
+    for offset in sorted(changed_set):
+        values = [payload[offset] for _, payload, _ in rows]
+        unique_values = sorted(set(values))
+        if not 2 <= len(unique_values) <= 8:
+            continue
+        states = []
+        for value in unique_values:
+            indexes = [index for index, current in enumerate(values) if current == value]
+            medians = {}
+            for signal in ("pitch_rate", "roll_rate", "yaw_rate"):
+                samples = [
+                    abs(rate_signals[signal][index])
+                    for index in indexes
+                    if rate_signals[signal][index] is not None
+                ]
+                medians[signal] = _median(samples) if samples else None
+            states.append({
+                "value": value,
+                "count": len(indexes),
+                "median_abs_rates": medians,
+            })
+        categorical_states.append({
+            "offset": offset,
+            "states": states,
+        })
+
     return {
         "changed": changed_set,
         "legacy_changed": {offset for offset in changed_set if offset < legacy_end},
@@ -964,6 +1071,9 @@ def _flyc_tail_diagnostics(stream: TrafficStream) -> dict | None:
         "words": words,
         "correlations": correlations[:12],
         "rate_correlations": rate_correlations[:12],
+        "second_rate_correlations": second_rate_correlations[:12],
+        "counter_candidates": counter_candidates,
+        "categorical_states": categorical_states,
         "legacy_slots": legacy_slots,
         "samples": len(rows),
         "tail_start": start,
