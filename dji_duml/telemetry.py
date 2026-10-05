@@ -6,6 +6,7 @@ payloads and preserve the undecoded tail instead of guessing its layout.
 """
 from __future__ import annotations
 
+import math
 import struct
 from dataclasses import dataclass
 
@@ -127,6 +128,28 @@ class GimbalParams:
         if self.quaternion_wxyz is None:
             return None
         return sum(value * value for value in self.quaternion_wxyz) ** 0.5
+
+    @property
+    def quaternion_euler_deg(self) -> tuple[float, float, float] | None:
+        """Quaternion converted to (pitch, roll, yaw) degrees.
+
+        M4T samples show the standard w,x,y,z aerospace conversion matching the
+        legacy int16 attitude fields to their 0.1-degree quantization.
+        """
+        if self.quaternion_wxyz is None:
+            return None
+        w, x, y, z = self.quaternion_wxyz
+        roll = math.degrees(math.atan2(
+            2.0 * (w * x + y * z),
+            1.0 - 2.0 * (x * x + y * y),
+        ))
+        sin_pitch = 2.0 * (w * y - z * x)
+        pitch = math.degrees(math.asin(max(-1.0, min(1.0, sin_pitch))))
+        yaw = math.degrees(math.atan2(
+            2.0 * (w * z + x * y),
+            1.0 - 2.0 * (y * y + z * z),
+        ))
+        return pitch, roll, yaw
 
 
 _GIMBAL_PREFIX = struct.Struct("<hhhBbHBB")
