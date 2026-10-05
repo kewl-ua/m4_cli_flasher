@@ -110,6 +110,35 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("|q|=1.000000", text)
         self.assertIn("opaque=21B", text)
 
+    def test_flyc_tail_diagnostics_find_raw_correlation(self):
+        topology = Topology(host=0x2A)
+        for seq, pitch_tenths in enumerate((-300, -100, 0, 200, 500), 1):
+            payload = bytearray(84)
+            struct.pack_into(
+                "<ddhhhhhhhBBI",
+                payload,
+                0,
+                0.0, 0.0,
+                0, 0, 0, 0,
+                pitch_tenths, 0, 0,
+                0, 0, 0,
+            )
+            payload[0x28:0x2A] = int(pitch_tenths).to_bytes(
+                2, "little", signed=True
+            )
+            payload[0x33] = 0x10 if seq % 2 else 0x00
+            topology.observe(
+                Frame(0x03, 0x0A, seq, 0x03, 0x43, bytes(payload), ack=0),
+                seq * 0.5,
+            )
+
+        text = report(topology, verbose=True)
+        self.assertIn("tail-changed:", text)
+        self.assertIn("0x28-0x29", text)
+        self.assertIn("@33=00..10", text)
+        self.assertIn("mask10", text)
+        self.assertIn("i16@28->pitch=+1.000", text)
+
     def test_gimbal_window_stats_cover_controlled_motion(self):
         stationary = bytes.fromhex(
             "00 00 00 00 9b fc 82 00 00 00 00 01"
