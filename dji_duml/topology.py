@@ -9,7 +9,7 @@ no retries. It never sends configuration, upgrade or control commands.
 """
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Iterable
 
@@ -33,6 +33,7 @@ DEVICE_TYPES = {
 
 MAX_UNIQUE_PAYLOADS = 4096
 MAX_SEQ_DELTAS = 64
+MAX_STREAM_SAMPLES = 4096
 
 
 @dataclass
@@ -59,6 +60,9 @@ class TrafficStream:
     seq_deltas: Counter[int] = field(default_factory=Counter)
     seq_deltas_capped: bool = False
     ack_counts: Counter[int] = field(default_factory=Counter)
+    _samples: deque[tuple[float | None, bytes]] = field(
+        default_factory=lambda: deque(maxlen=MAX_STREAM_SAMPLES), repr=False
+    )
 
     def observe(self, frame: Frame, timestamp: float | None) -> None:
         self.count += 1
@@ -73,6 +77,7 @@ class TrafficStream:
         self.payload_max = size if self.payload_max is None else max(self.payload_max, size)
 
         payload = bytes(frame.payload)
+        self._samples.append((timestamp, payload))
         if self._first_payload is None:
             self._first_payload = payload
         else:
@@ -355,6 +360,82 @@ def _angle_error_degrees(left: float, right: float) -> float:
     return abs((left - right + 180.0) % 360.0 - 180.0)
 
 
+
+def _pearson(left: list[float], right: list[float]) -> float | None:
+    if len(left) != len(right) or len(left) < 3:
+        return None
+    mean_left = sum(left) / len(left)
+    mean_right = sum(right) / len(right)
+    dl = [value - mean_left for value in left]
+    dr = [value - mean_right for value in right]
+    denom_left = sum(value * value for value in dl)
+    denom_right = sum(value * value for value in dr)
+    if denom_left <= 0 or denom_right <= 0:
+        return None
+    return sum(a * b for a, b in zip(dl, dr)) / (denom_left * denom_right) ** 0.5
+
+
+def _angle_delta_degrees(current: float, previous: float) -> float:
+    return (current - previous + 180.0) % 360.0 - 180.0
+
+
+def _gimbal_rate_correlations(stream: TrafficStream) -> dict[str, dict[str, float | None]]:
+    """Correlate opaque int16 fields with Euler angular rates.
+
+    Uses the device's verified millisecond timestamp, not host receive timing.
+    This is an RE diagnostic only; opaque fields are intentionally left unnamed.
+    """
+    if stream.cmd_set != 0x04 or stream.cmd_id != 0x05:
+        return {}
+
+    from .telemetry import parse_gimbal_params
+
+    rows = []
+    for _, payload in stream._samples:
+        if len(payload) < 24:
+            continue
+        try:
+            item = parse_gimbal_params(payload)
+        except UnexpectedReply:
+            continue
+        if item.timestamp_ms is None:
+            continue
+        rows.append((
+            item.timestamp_ms,
+            item.attitude_deg,
+            int.from_bytes(payload[0x14:0x16], "little", signed=True),
+            int.from_bytes(payload[0x16:0x18], "little", signed=True),
+        ))
+
+    pitch_rate: list[float] = []
+    roll_rate: list[float] = []
+    yaw_rate: list[float] = []
+    raw14: list[float] = []
+    raw16: list[float] = []
+    for previous, current in zip(rows, rows[1:]):
+        dt_ms = (current[0] - previous[0]) & 0xFFFFFFFF
+        if not 0 < dt_ms <= 1000:
+            continue
+        dt = dt_ms / 1000.0
+        pitch_rate.append(_angle_delta_degrees(current[1][0], previous[1][0]) / dt)
+        roll_rate.append(_angle_delta_degrees(current[1][1], previous[1][1]) / dt)
+        yaw_rate.append(_angle_delta_degrees(current[1][2], previous[1][2]) / dt)
+        raw14.append(float(current[2]))
+        raw16.append(float(current[3]))
+
+    return {
+        "i16@14": {
+            "pitch": _pearson(raw14, pitch_rate),
+            "roll": _pearson(raw14, roll_rate),
+            "yaw": _pearson(raw14, yaw_rate),
+        },
+        "i16@16": {
+            "pitch": _pearson(raw16, pitch_rate),
+            "roll": _pearson(raw16, roll_rate),
+            "yaw": _pearson(raw16, yaw_rate),
+        },
+    }
+
 def _gimbal_window_stats(stream: TrafficStream) -> dict | None:
     """Aggregate verified and raw 04/05 fields across retained unique payloads."""
     if stream.cmd_set != 0x04 or stream.cmd_id != 0x05:
@@ -564,6 +645,19 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                     if value is not None:
                                         raw_parts.append(f"{name}={int(value[0])}..{int(value[1])}")
                                 lines.append("       opaque-window: " + "  ".join(raw_parts))
+                            correlations = _gimbal_rate_correlations(stream)
+                            if correlations:
+                                corr_parts = []
+                                for field_name, axes in correlations.items():
+                                    rendered = ",".join(
+                                        f"{axis}={value:+.3f}"
+                                        for axis, value in axes.items()
+                                        if value is not None
+                                    )
+                                    if rendered:
+                                        corr_parts.append(f"{field_name}[{rendered}]")
+                                if corr_parts:
+                                    lines.append("       rate-corr: " + "  ".join(corr_parts))
                 lines.append(
                     f"       changed: {_offset_ranges(stream.changed_offsets)}"
                     + (" (length varies)" if stream.payload_length_changed else "")
