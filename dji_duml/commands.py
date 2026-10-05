@@ -40,6 +40,7 @@ FLYC = 0x03
 #: Flight controller config table commands, as named by the public
 #: dji-firmware-tools dissector; only E0, E1 and E2 are reads.
 FLYC_NAMES = {
+    0x43: "OSD General Data",
     0xDF: "Assistant Unlock", 0xE0: "Cfg Table Attribute", 0xE1: "Cfg Item Attribute",
     0xE2: "Cfg Item Value", 0xE3: "Cfg Item Set", 0xE4: "Cfg Item Reset",
     0xE5: "Push Cfg Table Attr", 0xE9: "Cfg Command Table",
