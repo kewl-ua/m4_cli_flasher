@@ -9,6 +9,7 @@ no retries. It never sends configuration, upgrade or control commands.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -411,7 +412,7 @@ def _find_stream(topology: Topology, cmd_set: int, cmd_id: int) -> TrafficStream
 
 
 def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
-    """Pair FLYC 03/43 with GIMBAL 04/05 and solve body-relative orientation."""
+    """Interpolate FC attitude, solve body-relative gimbal orientation and rank joint orders."""
     from .telemetry import (
         euler_deg_to_quaternion,
         parse_flyc_osd_general,
@@ -419,6 +420,7 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         quaternion_angular_distance_deg,
         quaternion_axis_angle_deg,
         quaternion_multiply,
+        quaternion_slerp,
         quaternion_to_euler_deg,
         relative_quaternion,
     )
@@ -436,7 +438,11 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
             item = parse_flyc_osd_general(payload)
         except UnexpectedReply:
             continue
-        fc_rows.append((timestamp, item.attitude_deg))
+        fc_rows.append((
+            timestamp,
+            item.attitude_deg,
+            euler_deg_to_quaternion(item.attitude_deg),
+        ))
 
     gimbal_rows = []
     for timestamp, payload in gimbal_stream._samples:
@@ -446,57 +452,129 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
             item = parse_gimbal_params(payload)
         except UnexpectedReply:
             continue
-        if item.quaternion_wxyz is None:
+        if (
+            item.quaternion_wxyz is None
+            or item.pitch_joint_deg is None
+            or item.roll_joint_deg is None
+        ):
             continue
         gimbal_rows.append((timestamp, item))
 
     if len(fc_rows) < 3 or len(gimbal_rows) < 3:
         return None
 
-    pairs = []
-    gi = 0
-    for fc_time, fc_att in fc_rows:
-        while gi + 1 < len(gimbal_rows):
-            here = abs(gimbal_rows[gi][0] - fc_time)
-            nxt = abs(gimbal_rows[gi + 1][0] - fc_time)
-            if nxt <= here:
-                gi += 1
-            else:
-                break
-        g_time, item = gimbal_rows[gi]
-        skew = abs(g_time - fc_time)
-        if skew <= 0.30:
-            body_q = euler_deg_to_quaternion(fc_att)
-            rel_q = relative_quaternion(body_q, item.quaternion_wxyz)
-            rel_att = quaternion_to_euler_deg(rel_q)
-            pairs.append((skew, fc_att, item, rel_att, rel_q))
+    fc_times = [row[0] for row in fc_rows]
+    joint_orders = (
+        ("yaw", "pitch", "roll"),
+        ("yaw", "roll", "pitch"),
+        ("pitch", "yaw", "roll"),
+        ("pitch", "roll", "yaw"),
+        ("roll", "yaw", "pitch"),
+        ("roll", "pitch", "yaw"),
+    )
+    axis_for = {"pitch": "y", "roll": "x", "yaw": "z"}
 
-    if len(pairs) < 3:
+    def candidate_joint_q(item, order):
+        angles = {
+            "pitch": item.pitch_joint_deg,
+            "roll": item.roll_joint_deg,
+            "yaw": item.relative_yaw_deg,
+        }
+        candidate = (1.0, 0.0, 0.0, 0.0)
+        for name in order:
+            candidate = quaternion_multiply(
+                candidate,
+                quaternion_axis_angle_deg(axis_for[name], angles[name]),
+            )
+        return candidate
+
+    def aligned_rows(lag_seconds):
+        rows = []
+        bracket_ms = []
+        for g_time, item in gimbal_rows:
+            target = g_time + lag_seconds
+            upper = bisect_right(fc_times, target)
+            if upper <= 0 or upper >= len(fc_rows):
+                continue
+            left = fc_rows[upper - 1]
+            right = fc_rows[upper]
+            span = right[0] - left[0]
+            if span <= 0 or span > 1.0:
+                continue
+            fraction = (target - left[0]) / span
+            fc_q = quaternion_slerp(left[2], right[2], fraction)
+            fc_att = quaternion_to_euler_deg(fc_q)
+            rel_q = relative_quaternion(fc_q, item.quaternion_wxyz)
+            rel_att = quaternion_to_euler_deg(rel_q)
+            rows.append((g_time, fc_att, item, rel_att, rel_q))
+            bracket_ms.append(span * 1000.0)
+        return rows, bracket_ms
+
+    lag_scores = []
+    for lag_ms in range(-300, 301, 10):
+        rows, _ = aligned_rows(lag_ms / 1000.0)
+        if len(rows) < 10:
+            continue
+        for order in joint_orders:
+            errors = [
+                quaternion_angular_distance_deg(candidate_joint_q(item, order), rel_q)
+                for _, _, item, _, rel_q in rows
+            ]
+            lag_scores.append({
+                "lag_ms": lag_ms,
+                "order": "*".join(order),
+                "median_error": _median(errors),
+                "max_error": max(errors),
+                "samples": len(errors),
+            })
+
+    if not lag_scores:
         return None
 
-    skews_ms = [row[0] * 1000.0 for row in pairs]
-    fc_pitch = [row[1][0] for row in pairs]
-    fc_roll = [row[1][1] for row in pairs]
-    fc_yaw = [row[1][2] for row in pairs]
-    g_pitch = [row[2].attitude_deg[0] for row in pairs]
-    g_roll = [row[2].attitude_deg[1] for row in pairs]
-    g_yaw = [row[2].attitude_deg[2] for row in pairs]
-    rel_q_pitch = [row[3][0] for row in pairs]
-    rel_q_roll = [row[3][1] for row in pairs]
-    rel_q_yaw = [row[3][2] for row in pairs]
+    lag_scores.sort(
+        key=lambda item: (
+            item["median_error"],
+            item["max_error"],
+            abs(item["lag_ms"]),
+        )
+    )
+    best = lag_scores[0]
+    best_rows, bracket_ms = aligned_rows(best["lag_ms"] / 1000.0)
+    if len(best_rows) < 3:
+        return None
 
-    joint_pitch = [
-        row[2].pitch_joint_deg if row[2].pitch_joint_deg is not None else 0.0
-        for row in pairs
-    ]
-    roll_joint = [
-        row[2].roll_joint_deg if row[2].roll_joint_deg is not None else 0.0
-        for row in pairs
-    ]
-    relative_yaw = [row[2].relative_yaw_deg for row in pairs]
+    # Rank orders again at the chosen temporal alignment.
+    order_scores = []
+    for order in joint_orders:
+        errors = [
+            quaternion_angular_distance_deg(candidate_joint_q(item, order), rel_q)
+            for _, _, item, _, rel_q in best_rows
+        ]
+        order_scores.append({
+            "order": "*".join(order),
+            "lag_ms": best["lag_ms"],
+            "median_error": _median(errors),
+            "max_error": max(errors),
+            "samples": len(errors),
+        })
+    order_scores.sort(key=lambda item: (item["median_error"], item["max_error"]))
+
+    fc_pitch = [row[1][0] for row in best_rows]
+    fc_roll = [row[1][1] for row in best_rows]
+    fc_yaw = [row[1][2] for row in best_rows]
+    g_pitch = [row[2].attitude_deg[0] for row in best_rows]
+    g_roll = [row[2].attitude_deg[1] for row in best_rows]
+    g_yaw = [row[2].attitude_deg[2] for row in best_rows]
+    rel_q_pitch = [row[3][0] for row in best_rows]
+    rel_q_roll = [row[3][1] for row in best_rows]
+    rel_q_yaw = [row[3][2] for row in best_rows]
+
+    joint_pitch = [row[2].pitch_joint_deg for row in best_rows]
+    roll_joint = [row[2].roll_joint_deg for row in best_rows]
+    relative_yaw = [row[2].relative_yaw_deg for row in best_rows]
     ref10 = [
         row[2].yaw_reference_deg if row[2].yaw_reference_deg is not None else 0.0
-        for row in pairs
+        for row in best_rows
     ]
 
     pitch_errors = [
@@ -512,49 +590,15 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         for field, solved in zip(relative_yaw, rel_q_yaw)
     ]
 
-    joint_orders = (
-        ("yaw", "pitch", "roll"),
-        ("yaw", "roll", "pitch"),
-        ("pitch", "yaw", "roll"),
-        ("pitch", "roll", "yaw"),
-        ("roll", "yaw", "pitch"),
-        ("roll", "pitch", "yaw"),
-    )
-    axis_for = {"pitch": "y", "roll": "x", "yaw": "z"}
-    order_scores = []
-    for order in joint_orders:
-        errors = []
-        for _, _, item, _, solved_q in pairs:
-            if item.pitch_joint_deg is None or item.roll_joint_deg is None:
-                continue
-            angles = {
-                "pitch": item.pitch_joint_deg,
-                "roll": item.roll_joint_deg,
-                "yaw": item.relative_yaw_deg,
-            }
-            candidate = (1.0, 0.0, 0.0, 0.0)
-            for name in order:
-                candidate = quaternion_multiply(
-                    candidate,
-                    quaternion_axis_angle_deg(axis_for[name], angles[name]),
-                )
-            errors.append(quaternion_angular_distance_deg(candidate, solved_q))
-        if errors:
-            order_scores.append({
-                "order": "*".join(order),
-                "median_error": _median(errors),
-                "max_error": max(errors),
-            })
-    order_scores.sort(key=lambda item: (item["median_error"], item["max_error"]))
-
     fc_yaw_u = _unwrap_degrees(fc_yaw)
     g_yaw_u = _unwrap_degrees(g_yaw)
     ref10_u = _unwrap_degrees(ref10)
 
     return {
-        "pairs": len(pairs),
-        "skew_median_ms": _median(skews_ms),
-        "skew_max_ms": max(skews_ms),
+        "pairs": len(best_rows),
+        "best_lag_ms": best["lag_ms"],
+        "fc_bracket_median_ms": _median(bracket_ms),
+        "fc_bracket_max_ms": max(bracket_ms),
         "fc_ranges": (_range(fc_pitch), _range(fc_roll), _range(fc_yaw_u)),
         "gimbal_ranges": (_range(g_pitch), _range(g_roll), _range(g_yaw_u)),
         "solved_relative_ranges": (
@@ -576,6 +620,7 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         "ref10_gimbal_corr": _pearson(ref10_u, g_yaw_u),
         "ref10_range": _range(ref10_u),
         "joint_order_scores": order_scores,
+        "lag_order_scores": lag_scores,
     }
 
 
@@ -943,9 +988,10 @@ def report(topology: Topology, *, commands_per_module: int = 8,
             joint_pitch, joint_roll, relative_yaw = cross["field_ranges"]
             lines.append(
                 "cross-attitude: "
-                f"pairs={cross['pairs']} "
-                f"skew={cross['skew_median_ms']:.1f}ms median/"
-                f"{cross['skew_max_ms']:.1f}ms max"
+                f"samples={cross['pairs']} "
+                f"best-lag={cross['best_lag_ms']:+d}ms "
+                f"fc-bracket={cross['fc_bracket_median_ms']:.1f}ms median/"
+                f"{cross['fc_bracket_max_ms']:.1f}ms max"
             )
             lines.append(
                 "    fc: "
