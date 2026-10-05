@@ -26,6 +26,13 @@ class GimbalParamsTests(unittest.TestCase):
         self.assertEqual(item.middle, self.SAMPLE[12:24])
         self.assertEqual(item.tail, bytes(9))
         self.assertAlmostEqual(item.quaternion_norm, 1.0, places=5)
+        q_pitch, q_roll, q_yaw = item.quaternion_euler_deg
+        self.assertAlmostEqual(q_pitch, 25.8525, places=3)
+        self.assertAlmostEqual(q_roll, -0.1105, places=3)
+        self.assertAlmostEqual(q_yaw, -87.1146, places=3)
+        self.assertAlmostEqual(q_pitch, item.attitude_deg[0], delta=0.1)
+        self.assertAlmostEqual(q_roll, item.attitude_deg[1], delta=0.1)
+        self.assertAlmostEqual(q_yaw, item.attitude_deg[2], delta=0.1)
 
     def test_quaternion_wz_matches_stationary_legacy_yaw(self):
         item = parse_gimbal_params(self.SAMPLE)
