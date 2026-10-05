@@ -468,6 +468,15 @@ produces false errors because the axes are coupled. Field 0x10 is reported
 separately as an internal yaw-reference candidate and is not assumed to be
 body yaw.
 
-The report includes host-time pairing skew, solved relative quaternion Euler
-ranges, correlations and median/max angular error, so a field is promoted only
-when the model survives controlled airframe and gimbal motion.
+Because FLYC 03/43 is about 2 Hz while GIMBAL 04/05 is about 10 Hz, cross-
+attitude does not use nearest-neighbour Euler subtraction. FC attitude samples
+are converted to quaternions and SLERP-interpolated to gimbal receive times.
+A small -300..+300 ms lag scan is evaluated jointly with all six candidate
+joint rotation orders. The report shows the chosen lag, FC interpolation
+bracket, solved relative quaternion Euler ranges, correlations and median/max
+orientation error.
+
+
+The joint-kinematics line ranks all six pitch/roll/yaw multiplication orders
+at the best temporal alignment. A close score between the top candidates is
+treated as unresolved rather than forcing an order.
