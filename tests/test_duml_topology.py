@@ -87,6 +87,20 @@ class PassiveTopologyTests(unittest.TestCase):
         self.assertIn("att=(-0.6,0.4,-85.4)deg", text)
         self.assertIn("state=0x00807000", text)
 
+    def test_verbose_report_decodes_gimbal_prefix_and_quaternion(self):
+        payload = bytes.fromhex(
+            "00 00 00 00 9b fc 82 00 00 00 00 01"
+            " f4 c6 97 00 11 de 00 00 fb ff 0f 00"
+            " 6c e4 39 3f 0c ae 81 35 6c b0 d9 b5 f4 02 30 bf"
+            " 00 00 00 00 00 00 00 00 00"
+        )
+        topology = Topology(host=0x2A)
+        topology.observe(Frame(0x04, 0x2A, 1, 4, 5, payload, ack=0), 1.0)
+        text = report(topology, verbose=True)
+        self.assertIn("decoded-prefix: att=(0.0,0.0,-86.9)deg", text)
+        self.assertIn("|q|=1.000000", text)
+        self.assertIn("opaque=21B", text)
+
     def test_report_distinguishes_confirmed_and_candidates(self):
         host = address(10, 1)
         fc = address(3, 0)
