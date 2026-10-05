@@ -411,8 +411,14 @@ def _find_stream(topology: Topology, cmd_set: int, cmd_id: int) -> TrafficStream
 
 
 def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
-    """Pair FLYC 03/43 with GIMBAL 04/05 and test body-relative angle models."""
-    from .telemetry import parse_flyc_osd_general, parse_gimbal_params
+    """Pair FLYC 03/43 with GIMBAL 04/05 and solve body-relative orientation."""
+    from .telemetry import (
+        euler_deg_to_quaternion,
+        parse_flyc_osd_general,
+        parse_gimbal_params,
+        quaternion_to_euler_deg,
+        relative_quaternion,
+    )
 
     fc_stream = _find_stream(topology, 0x03, 0x43)
     gimbal_stream = _find_stream(topology, 0x04, 0x05)
@@ -437,6 +443,8 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
             item = parse_gimbal_params(payload)
         except UnexpectedReply:
             continue
+        if item.quaternion_wxyz is None:
+            continue
         gimbal_rows.append((timestamp, item))
 
     if len(fc_rows) < 3 or len(gimbal_rows) < 3:
@@ -455,7 +463,10 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         g_time, item = gimbal_rows[gi]
         skew = abs(g_time - fc_time)
         if skew <= 0.30:
-            pairs.append((skew, fc_att, item))
+            body_q = euler_deg_to_quaternion(fc_att)
+            rel_q = relative_quaternion(body_q, item.quaternion_wxyz)
+            rel_att = quaternion_to_euler_deg(rel_q)
+            pairs.append((skew, fc_att, item, rel_att))
 
     if len(pairs) < 3:
         return None
@@ -467,28 +478,32 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
     g_pitch = [row[2].attitude_deg[0] for row in pairs]
     g_roll = [row[2].attitude_deg[1] for row in pairs]
     g_yaw = [row[2].attitude_deg[2] for row in pairs]
+    rel_q_pitch = [row[3][0] for row in pairs]
+    rel_q_roll = [row[3][1] for row in pairs]
+    rel_q_yaw = [row[3][2] for row in pairs]
+
     joint_pitch = [
         row[2].pitch_joint_deg if row[2].pitch_joint_deg is not None else 0.0
         for row in pairs
     ]
-    ext16 = [
-        (row[2].extension_16_raw or 0) / 10.0
-        for row in pairs
-    ]
+    ext16 = [(row[2].extension_16_raw or 0) / 10.0 for row in pairs]
     relative_yaw = [row[2].relative_yaw_deg for row in pairs]
     ref10 = [
         row[2].yaw_reference_deg if row[2].yaw_reference_deg is not None else 0.0
         for row in pairs
     ]
 
-    desired_pitch = [g - f for f, g in zip(fc_pitch, g_pitch)]
-    desired_roll = [_angle_delta_degrees(g, f) for f, g in zip(fc_roll, g_roll)]
-    desired_yaw = [_angle_delta_degrees(g, f) for f, g in zip(fc_yaw, g_yaw)]
-
-    pitch_errors = [abs(a - b) for a, b in zip(joint_pitch, desired_pitch)]
-    roll_errors = [abs(a - b) for a, b in zip(ext16, desired_roll)]
+    pitch_errors = [
+        _angle_error_degrees(field, solved)
+        for field, solved in zip(joint_pitch, rel_q_pitch)
+    ]
+    roll_errors = [
+        _angle_error_degrees(field, solved)
+        for field, solved in zip(ext16, rel_q_roll)
+    ]
     yaw_errors = [
-        _angle_error_degrees(a, b) for a, b in zip(relative_yaw, desired_yaw)
+        _angle_error_degrees(field, solved)
+        for field, solved in zip(relative_yaw, rel_q_yaw)
     ]
 
     fc_yaw_u = _unwrap_degrees(fc_yaw)
@@ -501,16 +516,19 @@ def _cross_attitude_diagnostics(topology: Topology) -> dict | None:
         "skew_max_ms": max(skews_ms),
         "fc_ranges": (_range(fc_pitch), _range(fc_roll), _range(fc_yaw_u)),
         "gimbal_ranges": (_range(g_pitch), _range(g_roll), _range(g_yaw_u)),
-        "relative_ranges": (
+        "solved_relative_ranges": (
+            _range(rel_q_pitch), _range(rel_q_roll), _range(rel_q_yaw)
+        ),
+        "field_ranges": (
             _range(joint_pitch), _range(ext16), _range(relative_yaw)
         ),
-        "pitch_joint_corr": _pearson(joint_pitch, desired_pitch),
+        "pitch_joint_corr": _pearson(joint_pitch, rel_q_pitch),
         "pitch_joint_error_median": _median(pitch_errors),
         "pitch_joint_error_max": max(pitch_errors),
-        "ext16_roll_corr": _pearson(ext16, desired_roll),
+        "ext16_roll_corr": _pearson(ext16, rel_q_roll),
         "ext16_roll_error_median": _median(roll_errors),
         "ext16_roll_error_max": max(roll_errors),
-        "relative_yaw_corr": _pearson(relative_yaw, desired_yaw),
+        "relative_yaw_corr": _pearson(relative_yaw, rel_q_yaw),
         "relative_yaw_error_median": _median(yaw_errors),
         "relative_yaw_error_max": max(yaw_errors),
         "ref10_fc_corr": _pearson(ref10_u, fc_yaw_u),
@@ -925,7 +943,8 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                 return f"{value:+.3f}" if value is not None else "?"
             fc_pitch, fc_roll, fc_yaw = cross["fc_ranges"]
             g_pitch, g_roll, g_yaw = cross["gimbal_ranges"]
-            joint_pitch, ext16, relative_yaw = cross["relative_ranges"]
+            solved_pitch, solved_roll, solved_yaw = cross["solved_relative_ranges"]
+            joint_pitch, ext16, relative_yaw = cross["field_ranges"]
             lines.append(
                 "cross-attitude: "
                 f"pairs={cross['pairs']} "
@@ -945,13 +964,19 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                 f"yaw={g_yaw[0]:.1f}..{g_yaw[1]:.1f}deg"
             )
             lines.append(
+                "    q-relative-solved: "
+                f"pitch={solved_pitch[0]:.1f}..{solved_pitch[1]:.1f} "
+                f"roll={solved_roll[0]:.1f}..{solved_roll[1]:.1f} "
+                f"yaw={solved_yaw[0]:.1f}..{solved_yaw[1]:.1f}deg"
+            )
+            lines.append(
                 "    relative-fields: "
                 f"joint@14={joint_pitch[0]:.1f}..{joint_pitch[1]:.1f} "
                 f"ext@16/10={ext16[0]:.1f}..{ext16[1]:.1f} "
                 f"yaw@08={relative_yaw[0]:.1f}..{relative_yaw[1]:.1f}deg"
             )
             lines.append(
-                "    body-relative-models: "
+                "    quaternion-relative-models: "
                 f"pitch corr={corr(cross['pitch_joint_corr'])} "
                 f"err={cross['pitch_joint_error_median']:.2f}/"
                 f"{cross['pitch_joint_error_max']:.2f}deg median/max; "
