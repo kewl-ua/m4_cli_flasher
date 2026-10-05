@@ -1655,6 +1655,30 @@ def report(topology: Topology, *, commands_per_module: int = 8,
                                 lines.append(
                                     "       tail-body-rate-fit: " + "  ".join(fit_parts)
                                 )
+                            motion = tail["motion_axis_rms"]
+                            lines.append(
+                                "       tail-motion: "
+                                f"rms[x={motion['omega_x']:.2f},"
+                                f"y={motion['omega_y']:.2f},"
+                                f"z={motion['omega_z']:.2f}] "
+                                f"dominant={tail['motion_dominant_axis']} "
+                                f"purity={tail['motion_purity']:.3f}"
+                            )
+                            if tail["unknown35_body_rate_fits"]:
+                                fit_parts = []
+                                for item in tail["unknown35_body_rate_fits"]:
+                                    fit_parts.append(
+                                        f"{item['signal']} "
+                                        f"lag={item['lag_samples']:+d} "
+                                        f"corr={item['corr']:+.3f} "
+                                        f"scale={item['slope']:+.5f} "
+                                        f"bias={item['intercept']:+.2f} "
+                                        f"rmse={item['rmse']:.2f}"
+                                    )
+                                lines.append(
+                                    "       tail-unknown35-fit: "
+                                    + "  ".join(fit_parts)
+                                )
                             if tail["counter_candidates"]:
                                 counter_parts = [
                                     f"@{item['offset']:02X}="
