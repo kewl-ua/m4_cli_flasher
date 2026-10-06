@@ -393,6 +393,7 @@ py -m dji_duml [общие ключи] <команда> [ключи команд
 | `fw ...` | нет | хранилище прошивок, [раздел выше](#хранилище-прошивок-dji-duml-fw) | 0, 1, 2 |
 | `flash PACKAGE --target V --expected-current V --yes` | запись | прошивка | 0, 2–5, 130 — таблица ниже |
 | `flash --from-store --target V --expected-current V --yes` | запись | прошивка версией `V` из хранилища | как `flash` |
+| `gimbal-cal {dev-mode\|joint-coarse\|linear-hall} [--force]` | запись (action) | триггер калибровки подвеса — кадр `04/08` + 1-байтный селектор, fire-and-forget (ответа нет), реверс из тула Dr. Failov. `dev-mode` (`71`, от камеры `0x02`) — **проверено на M4T**; `joint-coarse`/`linear-hall` (`01`/`02`, от `0x0A`) не подтверждены — только с `--force`. Подвес приходит в движение. Подробности — [docs/duml.md](docs/duml.md#калибровка-подвеса-реверс-тула-dr-failov) | 0; 2 — unconfirmed без `--force` |
 
 `PACKAGE` — офлайн-ZIP DJI, `dji_system.bin` или файл от `pack`.
 
@@ -718,7 +719,8 @@ sequenceDiagram
 | `sim.py` | эмулятор дрона и центра обновления M4T для тестов и `--simulate` |
 | `installed.py`, `params.py` | чтение манифеста установленной прошивки и параметров полётного контроллера |
 | `topology.py`, `telemetry.py`, `kinematics.py` | пассивная карта DUML-шины, typed телеметрия FLYC/Gimbal и quaternion-кинематика |
-| `cli.py` | `scan`, `version`, `inspect`, `plan`, `decode`, `topology`, `manifest`, `params`, `extract`, `pack`, `fw`, `flash` |
+| `gimbal.py` | триггеры калибровки подвеса (`04/08`), реверс из тула Dr. Failov; проверено на M4T |
+| `cli.py` | `scan`, `version`, `inspect`, `plan`, `decode`, `topology`, `manifest`, `params`, `gimbal-cal`, `extract`, `pack`, `fw`, `flash` |
 
 ## Тесты
 
