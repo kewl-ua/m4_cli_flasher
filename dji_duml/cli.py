@@ -396,6 +396,10 @@ def cmd_battery(args, profile) -> int:
 PROBE_ADDRESSES = [0x03, 0x04, 0x0B, 0x11, 0x1A, 0x28, 0x48, 0x68, 0x92, 0xA9, 0x1F,
                    0x18, 0x38, 0x58, 0x78, 0xB8]
 
+#: 00/51 serials come from the Ambarella SoCs; Assistant queries 0x28 (0801) with
+#: selector 0x01 and 0x68 (0803) with 0x04. serial-scan sweeps both by default.
+SERIAL_SCAN_TARGETS = [0x28, 0x68]
+
 
 def _probe_role(addr: int) -> str:
     return roles.DEVICE_TYPES.get(addr & 0x1F, f"type {addr & 0x1F}")
@@ -488,6 +492,50 @@ def cmd_probe(args, profile) -> int:
          else f"{responded} module(s) seen in the capture")
     if sensitive:
         _say("note: hardware/serial strings are device identifiers - do not publish them")
+    return 0
+
+
+def cmd_serial_scan(args, profile) -> int:
+    """Read-only sweep of the 00/51 serial selector: for each target SoC, send
+    selectors 0..max-selector and report which return a serial. Reads only (00/51
+    is a query), no retry. Serials are device identifiers and are not published."""
+    targets = args.address or SERIAL_SCAN_TARGETS
+    rows = []  # (target, selector, status, serial)
+    journal = Journal(args.journal)
+    with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+        for target in targets:
+            for selector in range(0, args.max_selector + 1):
+                try:
+                    status, serial = commands.scan_serial(
+                        client, target, selector, timeout=args.timeout, retries=0)
+                except NoReply:
+                    status, serial = None, None
+                except (UnexpectedReply, CommandRejected):
+                    status, serial = -1, None  # replied, but not a serial frame
+                rows.append((target, selector, status, serial))
+    return _serial_scan_report(args, targets, rows)
+
+
+def _serial_scan_report(args, targets, rows) -> int:
+    if args.json:
+        _say(json.dumps([{"target": format_address(t).replace(" ", ""),
+                          "selector": sel, "status": st, "serial": serial}
+                         for (t, sel, st, serial) in rows]))
+        return 0
+    found_any = False
+    for target in targets:
+        trows = [row for row in rows if row[0] == target]
+        serials = [(sel, serial) for (_, sel, _st, serial) in trows if serial]
+        replied = sum(1 for (_, _, st, _) in trows if st is not None)
+        _say(_ascii(f"{format_address(target):7} {_probe_role(target)}"))
+        for sel, serial in serials:
+            _say(_ascii(f"    selector 0x{sel:02x}: {serial}"))
+            found_any = True
+        if not serials:
+            _say("    no serials")
+        _say(f"    ({replied}/{len(trows)} selectors replied)")
+    if found_any:
+        _say("note: serials are device identifiers - do not publish them")
     return 0
 
 
@@ -1193,6 +1241,18 @@ def build_parser() -> argparse.ArgumentParser:
     prober.add_argument("--capture", help="discover from a capture instead of the drone")
     prober.add_argument("--json", action="store_true", help="one JSON list")
 
+    serialscan = sub.add_parser(
+        "serial-scan", help="read-only sweep of the 00/51 serial selector on the SoCs: which "
+                            "selectors return a serial; sends nothing that changes anything")
+    serialscan.add_argument("--address", type=_number, action="append", metavar="ADDR",
+                            help="target SoC to query, e.g. 0x68; repeatable (default: 0x28, 0x68)")
+    serialscan.add_argument("--max-selector", type=_number, default=0x1F, metavar="N",
+                            help="sweep selector bytes 0..N (default 0x1f)")
+    serialscan.add_argument("--timeout", type=float, default=0.8,
+                            help="seconds to wait for each selector (default 0.8; no retry)")
+    serialscan.add_argument("--json", action="store_true",
+                            help="one JSON list of every (target, selector)")
+
     extractor = sub.add_parser(
         "extract", help="recover the files a capture shows being sent to the upgrade center")
     extractor.add_argument("capture", help="pcap or pcapng, USBPcap or usbmon")
@@ -1265,8 +1325,8 @@ def build_parser() -> argparse.ArgumentParser:
 HANDLERS = {"scan": cmd_scan, "version": cmd_version, "inspect": cmd_inspect,
             "plan": cmd_plan, "decode": cmd_decode, "manifest": cmd_manifest,
             "params": cmd_params, "set-param": cmd_set_param, "battery": cmd_battery,
-            "probe": cmd_probe, "extract": cmd_extract, "pack": cmd_pack, "fw": cmd_fw,
-            "flash": cmd_flash}
+            "probe": cmd_probe, "serial-scan": cmd_serial_scan, "extract": cmd_extract,
+            "pack": cmd_pack, "fw": cmd_fw, "flash": cmd_flash}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -108,12 +108,28 @@ def parse_serial(payload: bytes) -> str | None:
     return text.decode("ascii")
 
 
-def get_serial(client: DumlClient, target: int, *, timeout: float = 1.0,
-               retries: int = 1) -> str | None:
+def scan_serial(client: DumlClient, target: int, selector: int, *,
+                timeout: float = 1.0, retries: int = 0) -> tuple[int | None, str | None]:
+    """Query one 00/51 serial slot: send ``selector`` (the one-byte request body)
+    to ``target`` and return ``(status, serial)`` -- the reply's status byte
+    (``None`` if the reply is empty) and the ASCII serial (``None`` when that slot
+    carries none). The selector picks which attached module's serial the target
+    returns (DJI Assistant sends 0x01 to 0x28 and 0x04 to 0x68). Read-only, and
+    defaults to no retry so sweeping unknown selectors stays quick. The serial is
+    a device identifier -- do not publish it."""
+    reply = client.request(target, GENERAL, GET_SERIAL, bytes([selector]),
+                           timeout=timeout, retries=retries)
+    status = reply.payload[0] if reply.payload else None
+    return status, parse_serial(reply.payload)
+
+
+def get_serial(client: DumlClient, target: int, *, selector: int = 0x01,
+               timeout: float = 1.0, retries: int = 1) -> str | None:
     """Read a module's 00/51 serial (``None`` if it answers without one).
+    ``selector`` is the one-byte request body (0x01 as Assistant sends to 0x28).
     Read-only, so it is retried. The value is sensitive; do not publish it."""
-    reply = client.request(target, GENERAL, GET_SERIAL, b"\x01", timeout=timeout, retries=retries)
-    return parse_serial(reply.payload)
+    _status, serial = scan_serial(client, target, selector, timeout=timeout, retries=retries)
+    return serial
 
 
 def parse_device_info(payload: bytes) -> str:

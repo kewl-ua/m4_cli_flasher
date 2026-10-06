@@ -269,7 +269,8 @@ class SimulatedM4T(SimulatedDrone):
                  tick: float | None = None, installed_config: bytes | None = None,
                  params: list[tuple] | None = None, require_unlock: bool = False,
                  ignore_writes=(), battery_data: bytes | None = None,
-                 device_info: bytes | None = None, **options):
+                 device_info: bytes | None = None,
+                 serials: dict[tuple[int, int], bytes] | None = None, **options):
         super().__init__(profile, firmware, **options)
         self.center = profile.upgrade_center
         #: What 00/4F type 01 returns; by default a manifest of ``firmware``.
@@ -290,6 +291,12 @@ class SimulatedM4T(SimulatedDrone):
         self.battery_data = SIM_BATTERY if battery_data is None else battery_data
         #: The string returned for a 00/FF device-info read.
         self.device_info = SIM_DEVICE_INFO if device_info is None else device_info
+        #: Optional selector-aware 00/51 table: {(receiver, selector byte): reply
+        #: payload}. When set, a 00/51 request is answered from it keyed by
+        #: (target, selector) -- and an unmatched (target, selector) gets no
+        #: reply -- so a selector sweep can be exercised. Left None, 00/51 keeps
+        #: the selector-agnostic GREETING_REPLIES behaviour.
+        self._serials = serials
         self.reboots = reboots
         self.zero_version_reads = zero_version_reads
         self.progress_every = progress_every
@@ -384,6 +391,14 @@ class SimulatedM4T(SimulatedDrone):
                 self.host_answers[frame.cmd_id] = frame.payload
             elif frame.cmd_id not in self.silent:
                 self._center_command(link, frame)
+            return
+        if (self._serials is not None and frame.cmd_set == commands.GENERAL
+                and frame.cmd_id == commands.GET_SERIAL and not frame.response):
+            self.received.append(frame)
+            selector = frame.payload[0] if frame.payload else None
+            reply = self._serials.get((frame.receiver, selector))
+            if reply is not None:  # an unknown (target, selector) gets no reply
+                self._answer(link, frame, reply)
             return
         greeting = GREETING_REPLIES.get((frame.receiver, frame.cmd_id))
         if greeting is not None and frame.cmd_set == commands.GENERAL and not frame.response:
