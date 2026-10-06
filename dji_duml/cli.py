@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
-from . import commands, installed, params, pcap, topology
+from . import commands, gimbal, installed, params, pcap, topology
 from .client import DumlClient
 from .errors import (
     DumlError, FlashAborted, FlashFailed, FlashOutcomeUnknown, FlashRefused,
@@ -102,6 +102,25 @@ def cmd_version(args, profile) -> int:
         _say(f"raw       {info.raw.hex(' ')}")
         if not profile.matches_hardware(info.hardware):
             _say(f"warning: hardware does not start with {profile.product_code!r}")
+    return 0
+
+
+def cmd_gimbal_cal(args, profile) -> int:
+    """Start a gimbal calibration (gimbal 04/08), reversed from the Dr. Failov
+    repair tool. DevMode is confirmed on the M4T; JointCoarse and Linear Hall are
+    the same command with a different selector but not confirmed (need --force).
+    Action command, fire-and-forget: the gimbal moves and the M4T sends no reply."""
+    cal = gimbal.CALIBRATIONS[args.kind]
+    if not cal.confirmed and not args.force:
+        _say(f"{cal.name} is {cal.note}; re-run with --force to send it anyway.")
+        return 2
+    journal = Journal(args.journal)
+    with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+        frame = gimbal.calibrate(client, args.kind)
+    _say(f"sent {cal.name}: {format_address(frame.sender)}>{format_address(frame.receiver)} "
+         f"04/08 {frame.payload.hex()} (fire-and-forget; the M4T sends no reply)")
+    if not cal.confirmed:
+        _say(f"note: {cal.note}")
     return 0
 
 
@@ -901,6 +920,14 @@ def build_parser() -> argparse.ArgumentParser:
     checker.add_argument("--fix", action="store_true",
                          help="quarantine damaged objects, adopt strays, sweep tmp")
 
+    gcal = sub.add_parser(
+        "gimbal-cal", help="start a gimbal calibration (04/08): dev-mode is confirmed on the "
+                           "M4T, joint-coarse/linear-hall are not (need --force); the gimbal moves")
+    gcal.add_argument("kind", choices=sorted(gimbal.CALIBRATIONS),
+                      help="dev-mode (confirmed), joint-coarse or linear-hall (unconfirmed)")
+    gcal.add_argument("--force", action="store_true",
+                      help="send an unconfirmed calibration (joint-coarse/linear-hall) anyway")
+
     flash = sub.add_parser("flash", help="write firmware (device must be prepared)")
     flash.add_argument("package", nargs="?", help="offline ZIP, dji_system.bin or a pack output")
     flash.add_argument("--from-store", action="store_true",
@@ -927,8 +954,8 @@ def build_parser() -> argparse.ArgumentParser:
 HANDLERS = {"scan": cmd_scan, "version": cmd_version, "inspect": cmd_inspect,
             "plan": cmd_plan, "decode": cmd_decode, "topology": cmd_topology,
             "manifest": cmd_manifest,
-            "params": cmd_params, "extract": cmd_extract, "pack": cmd_pack,
-            "fw": cmd_fw, "flash": cmd_flash}
+            "params": cmd_params, "gimbal-cal": cmd_gimbal_cal, "extract": cmd_extract,
+            "pack": cmd_pack, "fw": cmd_fw, "flash": cmd_flash}
 
 
 def main(argv: list[str] | None = None) -> int:

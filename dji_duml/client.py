@@ -148,6 +148,13 @@ class DumlClient:
         self._write(frame, log=log)
         return frame
 
+    def send_frame(self, frame: Frame, *, log: bool = True) -> Frame:
+        """Send a pre-built frame as-is, without waiting for a reply. For a
+        custom sender or sequence number the ``send``/``request`` helpers do not
+        set (they always use ``self.host`` and the running sequence)."""
+        self._write(frame, log=log)
+        return frame
+
     def send_batch(self, receiver: int, cmd_set: int, cmd_id: int, payloads, *,
                    ack: AckType = AckType.NONE, transfer: int = 2048) -> int:
         """Send many frames without waiting and without journaling them, as one
