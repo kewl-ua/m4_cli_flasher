@@ -11,9 +11,10 @@ from dji_duml.frame import AckType
 
 
 class Recorder:
-    """A stand-in client that records what calibrate() would send."""
-    def __init__(self):
+    """A stand-in client that records what calibrate()/factory_mode() would send."""
+    def __init__(self, host=0x2A):
         self.sent = []
+        self.host = host
 
     def send_frame(self, frame, *, log=True):
         self.sent.append(frame)
@@ -53,6 +54,31 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(recorder.sent[0].payload, b"\x71")
 
 
+class FactoryModeTests(unittest.TestCase):
+    def test_enter_frames_match_the_tool(self):
+        first, second, reboot = gimbal.factory_mode_frames(0x2A, True)
+        self.assertEqual((first.sender, first.receiver, first.cmd_set, first.cmd_id),
+                         (0x2A, 0x8F, 0x00, 0x44))
+        self.assertEqual(first.payload, b"\x80\x0astart_factory\x00")
+        self.assertEqual(second.receiver, 0x68)
+        self.assertEqual(second.payload, b"\x80\x0astart_factory\x00")
+        self.assertEqual((reboot.receiver, reboot.cmd_set, reboot.cmd_id), (0x0B, 0x00, 0x0B))
+        self.assertEqual(reboot.payload, b"\x00\x01" + bytes(12))
+        for frame in (first, second, reboot):
+            self.assertEqual((frame.seq, frame.ack), (0, AckType.AFTER_EXEC))
+
+    def test_exit_uses_stop_factory_and_mode_byte_2(self):
+        first, _second, reboot = gimbal.factory_mode_frames(0x2A, False)
+        self.assertEqual(first.payload, b"\x80\x0astop_factory\x00")
+        self.assertEqual(reboot.payload, b"\x00\x02" + bytes(12))
+
+    def test_factory_mode_sends_three_frames(self):
+        recorder = Recorder()
+        sent = gimbal.factory_mode(recorder, True)
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(recorder.sent, sent)
+
+
 class CliTests(unittest.TestCase):
     def test_dev_mode_sends(self):
         code, out, _ = run("--simulate", "16.01.0006", "gimbal-cal", "dev-mode")
@@ -69,6 +95,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("JointCoarse", out)
         self.assertIn("note:", out)
+
+    def test_factory_mode_enter_and_exit(self):
+        code, out, _ = run("--simulate", "16.01.0006", "factory-mode", "enter")
+        self.assertEqual(code, 0)
+        self.assertIn("start_factory", out)
+        self.assertIn("reboot", out.lower())
+        code, out, _ = run("--simulate", "16.01.0006", "factory-mode", "exit")
+        self.assertEqual(code, 0)
+        self.assertIn("stop_factory", out)
 
 
 if __name__ == "__main__":

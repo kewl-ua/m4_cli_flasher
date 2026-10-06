@@ -61,3 +61,36 @@ def calibrate(client, kind: str) -> Frame:
     frame = build(kind)
     client.send_frame(frame)
     return frame
+
+
+# --- factory mode -----------------------------------------------------------
+# The tool's full calibration programs wrap the 04/08 trigger in factory mode.
+# All frames go out from the host (0x2A), sequence 0, ack AFTER_EXEC, as captured.
+
+GENERAL = 0x00           #: general command set
+TEXT_COMMAND = 0x44      #: 00/44 -- run a named command (ASCII name in the body)
+REBOOT = 0x0B            #: 00/0b -- Reboot Chip
+FACTORY_TARGETS = (0x8F, 0x68)   #: 00/44 start/stop_factory goes to 1504 and 0803
+REBOOT_TARGET = 0x0B             #: the 00/0b reboot goes to 1100
+
+
+def factory_mode_frames(host: int, enter: bool) -> list[Frame]:
+    """The frames the tool sends to enter (``enter=True``) or exit factory mode:
+    ``00/44`` with ``start_factory``/``stop_factory`` to 1504 and 0803, then a
+    ``00/0b`` reboot (mode byte 01 enter / 02 exit). Sequence 0, ack AFTER_EXEC."""
+    name = b"start_factory\x00" if enter else b"stop_factory\x00"
+    body = bytes([0x80, 0x0A]) + name
+    reboot = bytes([0x00, 0x01 if enter else 0x02]) + bytes(12)
+    frames = [Frame(host, target, 0, GENERAL, TEXT_COMMAND, body) for target in FACTORY_TARGETS]
+    frames.append(Frame(host, REBOOT_TARGET, 0, GENERAL, REBOOT, reboot))
+    return frames
+
+
+def factory_mode(client, enter: bool) -> list[Frame]:
+    """Enter or exit factory mode as the tool does, fire-and-forget. The drone
+    REBOOTS -- the USB link drops and must be reconnected afterwards. Returns the
+    frames sent."""
+    frames = factory_mode_frames(client.host, enter)
+    for frame in frames:
+        client.send_frame(frame)
+    return frames

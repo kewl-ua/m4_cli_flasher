@@ -124,6 +124,20 @@ def cmd_gimbal_cal(args, profile) -> int:
     return 0
 
 
+def cmd_factory_mode(args, profile) -> int:
+    """Enter or exit the device factory mode (00/44 start/stop_factory + 00/0b
+    reboot), reversed from the Dr. Failov tool. Action command: the DRONE REBOOTS,
+    so the USB link drops -- reconnect before the next command."""
+    enter = args.state == "enter"
+    journal = Journal(args.journal)
+    with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
+        frames = gimbal.factory_mode(client, enter)
+    _say(f"sent factory-mode {args.state}: {len(frames)} frames "
+         f"(00/44 {'start' if enter else 'stop'}_factory to 1504+0803, then 00/0b reboot)")
+    _say("note: the drone is rebooting -- the USB link drops; reconnect before the next command")
+    return 0
+
+
 def _capture_frames(path):
     return (entry.frame for entry in pcap.iter_frames(path))
 
@@ -928,6 +942,11 @@ def build_parser() -> argparse.ArgumentParser:
     gcal.add_argument("--force", action="store_true",
                       help="send an unconfirmed calibration (joint-coarse/linear-hall) anyway")
 
+    fmode = sub.add_parser(
+        "factory-mode", help="enter or exit device factory mode (00/44 start/stop_factory + "
+                             "00/0b reboot); the DRONE REBOOTS and the USB link drops")
+    fmode.add_argument("state", choices=["enter", "exit"], help="enter or exit factory mode")
+
     flash = sub.add_parser("flash", help="write firmware (device must be prepared)")
     flash.add_argument("package", nargs="?", help="offline ZIP, dji_system.bin or a pack output")
     flash.add_argument("--from-store", action="store_true",
@@ -954,7 +973,8 @@ def build_parser() -> argparse.ArgumentParser:
 HANDLERS = {"scan": cmd_scan, "version": cmd_version, "inspect": cmd_inspect,
             "plan": cmd_plan, "decode": cmd_decode, "topology": cmd_topology,
             "manifest": cmd_manifest,
-            "params": cmd_params, "gimbal-cal": cmd_gimbal_cal, "extract": cmd_extract,
+            "params": cmd_params, "gimbal-cal": cmd_gimbal_cal,
+            "factory-mode": cmd_factory_mode, "extract": cmd_extract,
             "pack": cmd_pack, "fw": cmd_fw, "flash": cmd_flash}
 
 
