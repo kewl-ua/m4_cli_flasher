@@ -77,7 +77,9 @@ REBOOT_TARGET = 0x0B             #: the 00/0b reboot goes to 1100
 def factory_mode_frames(host: int, enter: bool) -> list[Frame]:
     """The frames the tool sends to enter (``enter=True``) or exit factory mode:
     ``00/44`` with ``start_factory``/``stop_factory`` to 1504 and 0803, then a
-    ``00/0b`` reboot (mode byte 01 enter / 02 exit). Sequence 0, ack AFTER_EXEC."""
+    ``00/0b`` whose mode byte is 01 to REBOOT into factory mode (enter) or 02 to
+    POWER THE DRONE OFF (exit -- verified on the M4T; the tool's log calls it
+    "TurnOff drone"). Sequence 0, ack AFTER_EXEC."""
     name = b"start_factory\x00" if enter else b"stop_factory\x00"
     body = bytes([0x80, 0x0A]) + name
     reboot = bytes([0x00, 0x01 if enter else 0x02]) + bytes(12)
@@ -87,9 +89,9 @@ def factory_mode_frames(host: int, enter: bool) -> list[Frame]:
 
 
 def factory_mode(client, enter: bool) -> list[Frame]:
-    """Enter or exit factory mode as the tool does, fire-and-forget. The drone
-    REBOOTS -- the USB link drops and must be reconnected afterwards. Returns the
-    frames sent."""
+    """Enter or exit factory mode as the tool does, fire-and-forget. On enter the
+    drone REBOOTS into factory mode; on exit it POWERS OFF (leaves factory mode on
+    the next power-on). Either way the USB link drops. Returns the frames sent."""
     frames = factory_mode_frames(client.host, enter)
     for frame in frames:
         client.send_frame(frame)

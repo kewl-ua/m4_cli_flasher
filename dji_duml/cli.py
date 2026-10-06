@@ -125,16 +125,23 @@ def cmd_gimbal_cal(args, profile) -> int:
 
 
 def cmd_factory_mode(args, profile) -> int:
-    """Enter or exit the device factory mode (00/44 start/stop_factory + 00/0b
-    reboot), reversed from the Dr. Failov tool. Action command: the DRONE REBOOTS,
-    so the USB link drops -- reconnect before the next command."""
+    """Enter or exit the device factory mode, reversed from the Dr. Failov tool.
+    Action command, fire-and-forget: enter (00/44 start_factory + 00/0b byte 01)
+    REBOOTS the drone into factory mode; exit (00/44 stop_factory + 00/0b byte 02)
+    POWERS IT OFF. Either way the USB link drops."""
     enter = args.state == "enter"
     journal = Journal(args.journal)
     with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
         frames = gimbal.factory_mode(client, enter)
+    tail = "00/0b reboot into factory mode" if enter else "00/0b power-off"
     _say(f"sent factory-mode {args.state}: {len(frames)} frames "
-         f"(00/44 {'start' if enter else 'stop'}_factory to 1504+0803, then 00/0b reboot)")
-    _say("note: the drone is rebooting -- the USB link drops; reconnect before the next command")
+         f"(00/44 {'start' if enter else 'stop'}_factory to 1504+0803, then {tail})")
+    if enter:
+        _say("note: the drone reboots into factory mode -- the USB link drops; "
+             "wait a few seconds, reconnect, then run the next command")
+    else:
+        _say("note: the drone POWERS OFF (it leaves factory mode on the next power-on); "
+             "turn it back on before the next command")
     return 0
 
 
