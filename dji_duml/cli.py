@@ -118,7 +118,7 @@ def cmd_gimbal_cal(args, profile) -> int:
     with journal, _opener(args, profile, journal, _drone(args, profile))() as client:
         frame = gimbal.calibrate(client, args.kind)
     _say(f"sent {cal.name}: {format_address(frame.sender)}>{format_address(frame.receiver)} "
-         f"04/08 {frame.payload.hex()} (fire-and-forget; the M4T sends no reply)")
+         f"04/08 {frame.payload.hex()} (fire-and-forget; we do not wait for the ack)")
     if not cal.confirmed:
         _say(f"note: {cal.note}")
     return 0

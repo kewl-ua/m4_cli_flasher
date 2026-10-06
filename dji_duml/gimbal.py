@@ -2,10 +2,11 @@
 Calibration Tool" (Dr. Failov / QUADRO.UA) talking DUML to a live M4T on 2026-10-06.
 
 All three calibrations are the *same* command -- gimbal set ``0x04``, id ``0x08``,
-to the gimbal (``0x04``) -- with a one-byte selector, sent fire-and-forget (the
-M4T sends no reply; ``ack`` is AFTER_EXEC, as the tool uses, and goes unanswered).
-The tool sends DevMode as the camera (``0x02``) and the other two as the app
-(``0x0A``); those exact senders are replicated here.
+to the gimbal (``0x04``) -- with a one-byte selector, sent fire-and-forget: we do
+not wait for a reply (``ack`` is AFTER_EXEC; the gimbal does ACK ``04/08`` with
+status 00, but an ack does NOT mean the calibration ran -- JointCoarse/Linear Hall
+are ACKed and still do nothing on the M4T). The tool sends DevMode as the camera
+(``0x02``) and the other two as the app (``0x0A``); those exact senders are here.
 
 Only **DevMode** was observed to actually run on the M4T. JointCoarse and Linear
 Hall are the same command with a different selector, but did not complete on the
